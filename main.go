@@ -138,6 +138,11 @@ func gitRoot() string {
 }
 
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "meat: "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	// Package errors are already prefixed "meat:"; don't double it up.
+	if !strings.HasPrefix(msg, "meat:") {
+		msg = "meat: " + msg
+	}
+	fmt.Fprintln(os.Stderr, msg)
 	os.Exit(1)
 }
