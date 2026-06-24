@@ -52,6 +52,17 @@ Abridged:
     +    }
 (The error message is assumed reasonable; only the checked condition matters.)
 
+When you elide a test body, keep it looking like CODE REVIEW, not prose. Prefer collapsing the test to its signature plus a short trailing comment describing what it does and how — the reviewer reads structure faster than a paragraph:
+    func TestRouteCacheEvicts(t *testing.T) { ... } // evicts on TTL expiry by advancing a fake clock past ExpiresAt
+Reach for a comment like this instead of a wall of explanatory text. Short code is often faster to read than text, so when the body itself is short and meaningful, just keep it.
+
+Raw (drop entirely — trivial context plumbing; nothing interesting is done with the ctx):
+    +    ctx := context.Background()
+    @@
+    -    m, err := meat.NewAnthropicFromEnv(*model)
+    +    m, err := meat.NewAnthropicFromEnv(ctx, *model)
+Abridged: omit. (Threading a context.Context through is a no-op to a reader. Only KEEP context handling when something INTERESTING happens with it — a timeout/deadline, cancellation, a value stored or read, a ctx that selects on Done.)
+
 Raw (keep exactly — everything matters; ideally the reviewer's diff GUI reduces this to one inline change):
     -    p, err := parseSSHKeyPerms(permsJSON)
     +    p, err := parseSSHKeyPerms(vals.Permissions)
