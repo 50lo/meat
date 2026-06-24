@@ -28,8 +28,10 @@ git diff main...HEAD | go run meat.dev
 go run meat.dev -h
 ```
 
-Requires `ANTHROPIC_API_KEY`. Optional: `ANTHROPIC_BASE_URL`, `MEAT_MODEL` (or
-`-model`).
+On an **exe.dev VM** with an attached `llm` integration, `meat` uses the managed
+LLM gateway automatically — no API key needed. Otherwise it requires
+`ANTHROPIC_API_KEY`. Optional: `ANTHROPIC_BASE_URL`, `MEAT_MODEL` (or `-model`).
+The default model is Claude Opus 4.8.
 
 With no stdin pipe, `meat` reads the top commit (`git show HEAD`) of the repo
 you're in and summarizes it.

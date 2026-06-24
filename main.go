@@ -43,9 +43,13 @@ Flags:
   -h, --help      Show this help.
 
 Environment:
-  ANTHROPIC_API_KEY    Required. API key for the built-in Anthropic backend.
+  ANTHROPIC_API_KEY    API key for the built-in Anthropic backend.
   ANTHROPIC_BASE_URL   Optional. Override the API base URL.
   MEAT_MODEL           Optional. Default model id.
+
+On an exe.dev VM with an attached "llm" integration, meat uses the managed
+LLM gateway automatically — no API key needed. Set ANTHROPIC_API_KEY (or
+ANTHROPIC_BASE_URL) to override.
 `
 
 func main() {
@@ -61,6 +65,8 @@ func main() {
 		os.Exit(2)
 	}
 
+	ctx := context.Background()
+
 	diff, source, err := readDiff()
 	if err != nil {
 		fatal("%v", err)
@@ -69,7 +75,7 @@ func main() {
 		fatal("no diff to read (%s)", source)
 	}
 
-	m, err := meat.NewAnthropicFromEnv(*model)
+	m, err := meat.NewAnthropicFromEnv(ctx, *model)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -78,7 +84,7 @@ func main() {
 	// agent can inspect surrounding source for clues.
 	root := gitRoot()
 
-	res, err := meat.Abridge(context.Background(), m, meat.Request{
+	res, err := meat.Abridge(ctx, m, meat.Request{
 		RepoRoot:    root,
 		UnifiedDiff: diff,
 	})

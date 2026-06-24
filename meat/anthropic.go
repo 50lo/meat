@@ -13,33 +13,56 @@ import (
 )
 
 // DefaultAnthropicModel is the model used when AnthropicModel.Model is empty.
-const DefaultAnthropicModel = "claude-sonnet-4-5"
+const DefaultAnthropicModel = "claude-opus-4-8"
 
 // AnthropicModel is a built-in Model backed by the Anthropic Messages API. It
 // uses only the standard library so meat.dev has no third-party dependencies.
 type AnthropicModel struct {
-	APIKey  string       // required
+	APIKey  string       // API key (or "implicit" for the exe.dev gateway)
 	Model   string       // defaults to DefaultAnthropicModel
-	BaseURL string       // defaults to https://api.anthropic.com
+	BaseURL string       // bare origin/prefix; defaults to https://api.anthropic.com. "/v1/messages" is appended.
 	HTTPC   *http.Client // defaults to a client with a 2m timeout
 }
 
-// NewAnthropicFromEnv builds an AnthropicModel from ANTHROPIC_API_KEY,
-// ANTHROPIC_BASE_URL, and the given model (falling back to $MEAT_MODEL then the
-// default). It returns an error if no API key is configured.
-func NewAnthropicFromEnv(model string) (*AnthropicModel, error) {
-	key := os.Getenv("ANTHROPIC_API_KEY")
-	if key == "" {
-		return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set")
-	}
+// implicitGatewayKey is the placeholder API key sent to the exe.dev LLM
+// gateway. The gateway injects the real managed credential at the network edge,
+// so no provider key needs to live on the VM.
+const implicitGatewayKey = "implicit"
+
+// NewAnthropicFromEnv builds an AnthropicModel, preferring the exe.dev managed
+// LLM gateway when available so meat works on an exe.dev VM with no API key.
+//
+// Resolution order:
+//  1. If ANTHROPIC_API_KEY (or ANTHROPIC_BASE_URL) is set, use it directly.
+//  2. Otherwise, on an exe.dev VM with an attached "llm" integration, route
+//     through the gateway at https://<llm-host>/anthropic with managed creds.
+//  3. Otherwise, error.
+//
+// model falls back to $MEAT_MODEL, then DefaultAnthropicModel.
+func NewAnthropicFromEnv(ctx context.Context, model string) (*AnthropicModel, error) {
 	if model == "" {
 		model = os.Getenv("MEAT_MODEL")
 	}
-	return &AnthropicModel{
-		APIKey:  key,
-		Model:   model,
-		BaseURL: os.Getenv("ANTHROPIC_BASE_URL"),
-	}, nil
+	if model == "" {
+		model = DefaultAnthropicModel
+	}
+
+	key := os.Getenv("ANTHROPIC_API_KEY")
+	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
+	if key != "" || baseURL != "" {
+		return &AnthropicModel{APIKey: key, Model: model, BaseURL: baseURL}, nil
+	}
+
+	// No explicit credentials: try the exe.dev managed gateway.
+	if base := discoverExeGatewayBase(ctx, nil); base != "" {
+		return &AnthropicModel{
+			APIKey:  implicitGatewayKey,
+			Model:   model,
+			BaseURL: base + "/anthropic",
+		}, nil
+	}
+
+	return nil, fmt.Errorf("no LLM credentials: set ANTHROPIC_API_KEY, or run on an exe.dev VM with an attached 'llm' integration")
 }
 
 // --- wire types ---
