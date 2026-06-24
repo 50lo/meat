@@ -17,15 +17,18 @@ load-bearing) and prints the abridged diff plus a one-line summary.
 ## Install / run
 
 ```bash
+# install the `meat` binary
+go install meat.dev/cmd/meat@latest
+
 # summarize the most recent commit in the current repo
-go run meat.dev
+go run meat.dev/cmd/meat
 
 # abridge any diff piped on stdin
-git show <sha> | go run meat.dev
-git diff main...HEAD | go run meat.dev
+git show <sha> | go run meat.dev/cmd/meat
+git diff main...HEAD | go run meat.dev/cmd/meat
 
 # help
-go run meat.dev -h
+go run meat.dev/cmd/meat -h
 ```
 
 On an **exe.dev VM** with an attached `llm` integration, `meat` uses the managed
@@ -38,7 +41,7 @@ you're in and summarizes it.
 
 ## Layout
 
-- `meat.dev` (top level) — `package main`, the CLI. Stdlib only.
+- `meat.dev/cmd/meat` — `package main`, the CLI. Stdlib only.
 - `meat.dev/meat` — the reusable guts: the agent loop (`Abridge`), the rubric,
   the read-only tools, and a provider-agnostic `Model` interface plus a built-in
   stdlib `AnthropicModel`.
