@@ -8,6 +8,10 @@
 //	# summarize the most recent commit in the current repo
 //	meat
 //
+//	# summarize a specific commit or revision
+//	meat <sha>
+//	meat HEAD~3
+//
 //	# abridge any diff piped on stdin
 //	git show <sha> | meat
 //	git diff main...HEAD | meat
@@ -31,12 +35,13 @@ const usage = `meat — abridge a diff into a "reading diff"
 
 Usage:
   meat                 Summarize the most recent commit (HEAD) in the current git repo.
+  meat <revision>      Summarize a specific commit or revision (e.g. a sha, HEAD~3).
   git show <sha> | meat   Abridge the diff piped on stdin.
   git diff | meat         Abridge the working-tree diff piped on stdin.
 
-meat reads a unified diff (from stdin, or HEAD when stdin is a terminal), asks an
-LLM to drop everything not worth reading, and prints the abridged diff plus a
-one-line summary.
+meat reads a unified diff (from stdin, from a named revision, or HEAD when stdin
+is a terminal), asks an LLM to drop everything not worth reading, and prints the
+abridged diff plus a one-line summary.
 
 Flags:
   -model string   Model to use (default $MEAT_MODEL or a built-in default).
@@ -67,7 +72,7 @@ func main() {
 
 	ctx := context.Background()
 
-	diff, source, err := readDiff()
+	diff, source, err := readDiff(fs.Args())
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -103,10 +108,24 @@ func main() {
 	fmt.Fprintf(os.Stderr, "\nmeat: tokens in=%d out=%d\n", res.InputTokens, res.OutputTokens)
 }
 
-// readDiff returns the diff to abridge: stdin when piped, otherwise `git show`
-// of the top commit (HEAD) in the current repo. The second return value names
-// the source for error messages.
-func readDiff() (string, string, error) {
+// readDiff returns the diff to abridge. Precedence:
+//   - an explicit revision argument: `git show` of that revision;
+//   - stdin, when piped;
+//   - otherwise `git show` of the top commit (HEAD) in the current repo.
+//
+// The second return value names the source for error messages.
+func readDiff(args []string) (string, string, error) {
+	if len(args) > 1 {
+		return "", "", fmt.Errorf("too many arguments: want at most one revision, got %d", len(args))
+	}
+	if len(args) == 1 {
+		rev := args[0]
+		out, err := git("show", "--format=fuller", rev)
+		if err != nil {
+			return "", rev, fmt.Errorf("reading %q: %w", rev, err)
+		}
+		return out, rev, nil
+	}
 	if stdinIsPiped() {
 		data, err := readAllStdin()
 		if err != nil {
@@ -114,7 +133,7 @@ func readDiff() (string, string, error) {
 		}
 		return string(data), "stdin", nil
 	}
-	// No pipe: summarize the top commit.
+	// No pipe and no revision: summarize the top commit.
 	out, err := git("show", "--format=fuller", "HEAD")
 	if err != nil {
 		return "", "HEAD", fmt.Errorf("reading HEAD (are you in a git repo?): %w", err)

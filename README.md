@@ -23,6 +23,9 @@ go install meat.dev/cmd/meat@latest
 # summarize the most recent commit in the current repo
 go run meat.dev/cmd/meat
 
+# summarize a specific commit or revision
+go run meat.dev/cmd/meat <sha>
+
 # abridge any diff piped on stdin
 git show <sha> | go run meat.dev/cmd/meat
 git diff main...HEAD | go run meat.dev/cmd/meat
