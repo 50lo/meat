@@ -24,9 +24,11 @@ When done, call the submit tool with the abridged diff and a one-line summary.
 
 5. DROP generated code entirely. The reviewer NEVER wants to read machine-generated files — they are an output of the change, not the change itself. When a changed file is generated, omit its hunks and note in the summary that generated files changed (ideally which, and what produced them). Recognize generated files from clues such as: a "Code generated ... DO NOT EDIT." header line; paths/names like *.pb.go, *_string.go, *_gen.go, *.gen.go, generated*.ts, *.min.js, mocks, bindings, or vendored trees; lockfiles (go.sum, package-lock.json, pnpm-lock.yaml, Cargo.lock); and snapshots/golden test data. If unsure whether a file is generated, use read_file to check its header, or grep for a generator directive. Keep hand-written changes that merely accompany regeneration (e.g. the .proto or //go:generate directive that drove it) — those ARE the change.
 
-6. NEVER invent or alter program logic. Eliding is allowed; lying is not. If unsure whether something matters, KEEP it.
+6. DROP boring import changes. Adding/removing imports is almost always a mechanical consequence of the real change (kept code already shows the new package being used) — the reviewer does not need to read the import block. ONLY keep an import change when the CHOICE of package is itself the interesting part of the diff: a switch between near-equivalent packages with different semantics or trust properties (the classic math/rand vs crypto/rand for anything security-sensitive), swapping a dependency for an alternative (e.g. encoding/json → a faster third-party JSON package, gorilla/mux → chi), dropping a third-party library in favor of the standard library (or vice versa), or pulling in a surprising/heavyweight new dependency. In those cases keep ONLY the import line(s) that reveal the choice, ideally with a short parenthetical noting why it matters — and still DROP any other imports that merely came along for the ride (companion imports added only because the new code path now uses them). Plain stdlib-to-stdlib churn and obviously-needed imports: omit.
 
-7. Preserve enough hunk/context structure (@@ headers, a little context) that the reviewer can locate the change. Keep +/- prefixes.
+7. NEVER invent or alter program logic. Eliding is allowed; lying is not. If unsure whether something matters, KEEP it.
+
+8. Preserve enough hunk/context structure (@@ headers, a little context) that the reviewer can locate the change. Keep +/- prefixes.
 
 ## Worked examples
 
@@ -62,6 +64,21 @@ Raw (drop entirely — trivial context plumbing; nothing interesting is done wit
     -    m, err := meat.NewAnthropicFromEnv(*model)
     +    m, err := meat.NewAnthropicFromEnv(ctx, *model)
 Abridged: omit. (Threading a context.Context through is a no-op to a reader. Only KEEP context handling when something INTERESTING happens with it — a timeout/deadline, cancellation, a value stored or read, a ctx that selects on Done.)
+
+Raw (drop entirely — boring import churn forced by kept code):
+    -    "errors"
+    +    "fmt"
+    +    "strings"
+Abridged: omit. (Mechanical: the kept code already shows fmt/strings being used.)
+
+Raw (keep — the package CHOICE is the actual change; security-relevant):
+    -    "math/rand"
+    +    "crypto/rand"
+    +    "encoding/hex"
+Abridged:
+    -    "math/rand"
+    +    "crypto/rand"  (now using a cryptographically secure RNG)
+(Swapping math/rand for crypto/rand changes the security properties — exactly the kind of import the reviewer must see. The added encoding/hex is a companion import that just came along; drop it.)
 
 Raw (keep exactly — everything matters; ideally the reviewer's diff GUI reduces this to one inline change):
     -    p, err := parseSSHKeyPerms(permsJSON)
