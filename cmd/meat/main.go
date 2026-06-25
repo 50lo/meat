@@ -28,6 +28,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -48,14 +49,19 @@ meat reads a unified diff (from stdin, from a named revision or range, or HEAD
 when stdin is a terminal), asks an LLM to drop everything not worth reading, and
 prints the abridged diff plus a one-line summary.
 
+Results are cached under ~/.meat keyed by the SHA of (model + diff contents),
+so re-running on an unchanged diff is instant; any edit to the diff recomputes.
+
 Flags:
   -model string   Model to use (default $MEAT_MODEL or a built-in default).
+  -no-cache       Ignore any cached result and recompute (still updates cache).
   -h, --help      Show this help.
 
 Environment:
   ANTHROPIC_API_KEY    API key for the built-in Anthropic backend.
   ANTHROPIC_BASE_URL   Optional. Override the API base URL.
   MEAT_MODEL           Optional. Default model id.
+  MEAT_CACHE           Optional. Cache directory (default ~/.meat; empty disables).
 
 On an exe.dev VM with an attached "llm" integration, meat uses the managed
 LLM gateway automatically — no API key needed. Set ANTHROPIC_API_KEY (or
@@ -67,6 +73,7 @@ func main() {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	model := fs.String("model", "", "model to use (default $MEAT_MODEL or built-in default)")
+	noCache := fs.Bool("no-cache", false, "ignore any cached result and recompute (still updates the cache)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag already printed the error and (for -h) the usage.
 		if err == flag.ErrHelp {
@@ -74,8 +81,6 @@ func main() {
 		}
 		os.Exit(2)
 	}
-
-	ctx := context.Background()
 
 	diff, source, err := readDiff(fs.Args())
 	if err != nil {
@@ -85,32 +90,87 @@ func main() {
 		fatal("no diff to read (%s)", source)
 	}
 
-	m, err := meat.NewAnthropicFromEnv(ctx, *model)
-	if err != nil {
-		fatal("%v", err)
+	// compute produces a fresh result on a cache miss. It is a closure so run()
+	// can be unit-tested without an LLM: the real path constructs the Anthropic
+	// model (which needs credentials/network) only here, AFTER the cache check.
+	compute := func(ctx context.Context) (*meat.Result, error) {
+		m, err := meat.NewAnthropicFromEnv(ctx, *model)
+		if err != nil {
+			return nil, err
+		}
+		// Confine the read-only tools to the repo root, when we're in one, so
+		// the agent can inspect surrounding source for clues.
+		return meat.Abridge(ctx, m, meat.Request{
+			RepoRoot:    gitRoot(),
+			UnifiedDiff: diff,
+		})
 	}
 
-	// Confine the read-only tools to the repo root, when we're in one, so the
-	// agent can inspect surrounding source for clues.
-	root := gitRoot()
-
-	res, err := meat.Abridge(ctx, m, meat.Request{
-		RepoRoot:    root,
-		UnifiedDiff: diff,
-	})
-	if err != nil {
+	opts := runOpts{
+		diff:     diff,
+		model:    meat.ResolveModel(*model),
+		cacheDir: cacheDir(),
+		noCache:  *noCache,
+		compute:  compute,
+		stdout:   os.Stdout,
+		stderr:   os.Stderr,
+	}
+	if err := run(context.Background(), opts); err != nil {
 		fatal("%v", err)
 	}
+}
 
+// runOpts carries everything run needs, so the orchestration (cache lookup,
+// compute-on-miss, store, print) can be tested in isolation from flag parsing,
+// git, and the LLM.
+type runOpts struct {
+	diff     string
+	model    string // already resolved (post $MEAT_MODEL/default)
+	cacheDir string
+	noCache  bool
+	// compute produces a fresh result on a cache miss. The real implementation
+	// constructs the LLM-backed model; it must only be called on a miss.
+	compute func(ctx context.Context) (*meat.Result, error)
+	stdout  io.Writer
+	stderr  io.Writer
+}
+
+// run is the cache-aware core: look up by SHA of (model + diff); on a hit,
+// print and return without touching opts.compute (so cache hits are instant and
+// need no credentials); on a miss, compute, store, and print. -no-cache skips
+// the read but still writes through.
+func run(ctx context.Context, o runOpts) error {
+	key := cacheKey(o.diff, o.model)
+	if !o.noCache {
+		if res, ok := cacheLoad(o.cacheDir, key); ok {
+			printResult(o.stdout, res)
+			fmt.Fprintf(o.stderr, "\nmeat: cached (sha %s)\n", key[:12])
+			return nil
+		}
+	}
+
+	res, err := o.compute(ctx)
+	if err != nil {
+		return err
+	}
+
+	cacheStore(o.cacheDir, key, res)
+
+	printResult(o.stdout, res)
+	fmt.Fprintf(o.stderr, "\nmeat: tokens in=%d out=%d\n", res.InputTokens, res.OutputTokens)
+	return nil
+}
+
+// printResult writes the abridged reading diff (summary + diff) to w.
+func printResult(w io.Writer, res *meat.Result) {
 	if res.Summary != "" {
-		fmt.Printf("# %s\n\n", res.Summary)
+		fmt.Fprintf(w, "# %s\n\n", res.Summary)
 	}
 	if strings.TrimSpace(res.SmartDiff) == "" {
-		fmt.Println("(no meaningful change to read)")
+		fmt.Fprintln(w, "(no meaningful change to read)")
 	} else {
-		fmt.Println(strings.TrimRight(res.SmartDiff, "\n"))
+		fmt.Fprintln(w, strings.TrimRight(res.SmartDiff, "\n"))
 	}
-	fmt.Fprintf(os.Stderr, "\nmeat: tokens in=%d out=%d\n", res.InputTokens, res.OutputTokens)
 }
 
 // readDiff returns the diff to abridge. Precedence:

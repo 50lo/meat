@@ -43,6 +43,11 @@ LLM gateway automatically — no API key needed. Otherwise it requires
 `ANTHROPIC_API_KEY`. Optional: `ANTHROPIC_BASE_URL`, `MEAT_MODEL` (or `-model`).
 The default model is Claude Opus 4.8.
 
+Results are cached under `~/.meat`, keyed by the SHA-256 of the model plus the
+diff contents. Re-running on an unchanged diff is instant; any edit to the diff
+changes the key and recomputes. Pass `-no-cache` to force a recompute, set
+`MEAT_CACHE` to use a different directory, or `MEAT_CACHE=` to disable caching.
+
 With no stdin pipe, `meat` reads the top commit (`git show HEAD`) of the repo
 you're in and summarizes it.
 

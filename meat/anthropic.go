@@ -24,6 +24,20 @@ type AnthropicModel struct {
 	HTTPC   *http.Client // defaults to a client with a 2m timeout
 }
 
+// ResolveModel applies the model-id fallback chain used by NewAnthropicFromEnv:
+// the explicit value, then $MEAT_MODEL, then DefaultAnthropicModel. It performs
+// no network or credential work, so callers (e.g. a cache key) can resolve the
+// effective model id cheaply and offline.
+func ResolveModel(model string) string {
+	if model == "" {
+		model = os.Getenv("MEAT_MODEL")
+	}
+	if model == "" {
+		model = DefaultAnthropicModel
+	}
+	return model
+}
+
 // implicitGatewayKey is the placeholder API key sent to the exe.dev LLM
 // gateway. The gateway injects the real managed credential at the network edge,
 // so no provider key needs to live on the VM.
@@ -40,12 +54,7 @@ const implicitGatewayKey = "implicit"
 //
 // model falls back to $MEAT_MODEL, then DefaultAnthropicModel.
 func NewAnthropicFromEnv(ctx context.Context, model string) (*AnthropicModel, error) {
-	if model == "" {
-		model = os.Getenv("MEAT_MODEL")
-	}
-	if model == "" {
-		model = DefaultAnthropicModel
-	}
+	model = ResolveModel(model)
 
 	key := os.Getenv("ANTHROPIC_API_KEY")
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
