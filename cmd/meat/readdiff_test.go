@@ -63,6 +63,64 @@ func TestReadDiffRevisionArg(t *testing.T) {
 	}
 }
 
+// TestReadDiffRevRange verifies that `meat A..B` diffs across the range rather
+// than showing a single commit.
+func TestReadDiffRevRange(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not found: %v", err)
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	if err := os.WriteFile("a.txt", []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "a.txt")
+	run("commit", "-q", "-m", "first commit: add a.txt")
+	base, err := git("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base = strings.TrimSpace(base)
+
+	if err := os.WriteFile("b.txt", []byte("world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "b.txt")
+	run("commit", "-q", "-m", "second commit: add b.txt")
+
+	for _, rng := range []string{base + "..HEAD", base + "...HEAD"} {
+		diff, source, err := readDiff([]string{rng})
+		if err != nil {
+			t.Fatalf("readDiff(%q): %v", rng, err)
+		}
+		if source != rng {
+			t.Errorf("source = %q, want %q", source, rng)
+		}
+		// The range adds b.txt (the only change between base and HEAD).
+		if !strings.Contains(diff, "b.txt") {
+			t.Errorf("range %q diff missing b.txt:\n%s", rng, diff)
+		}
+		// `git diff` of a range carries no commit metadata; if we'd run
+		// `git show` instead, the commit message would leak in.
+		if strings.Contains(diff, "second commit") {
+			t.Errorf("range %q produced commit metadata; used 'git show' not 'git diff':\n%s", rng, diff)
+		}
+	}
+}
+
 // TestReadDiffBadRevision surfaces a useful error for an unknown revision.
 func TestReadDiffBadRevision(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {

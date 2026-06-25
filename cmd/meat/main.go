@@ -12,6 +12,10 @@
 //	meat <sha>
 //	meat HEAD~3
 //
+//	# diff across a commit range
+//	meat <sha1>..<sha2>
+//	meat main...HEAD
+//
 //	# abridge any diff piped on stdin
 //	git show <sha> | meat
 //	git diff main...HEAD | meat
@@ -36,12 +40,13 @@ const usage = `meat — abridge a diff into a "reading diff"
 Usage:
   meat                 Summarize the most recent commit (HEAD) in the current git repo.
   meat <revision>      Summarize a specific commit or revision (e.g. a sha, HEAD~3).
+  meat <range>         Diff across a commit range (e.g. sha1..sha2, main...HEAD).
   git show <sha> | meat   Abridge the diff piped on stdin.
   git diff | meat         Abridge the working-tree diff piped on stdin.
 
-meat reads a unified diff (from stdin, from a named revision, or HEAD when stdin
-is a terminal), asks an LLM to drop everything not worth reading, and prints the
-abridged diff plus a one-line summary.
+meat reads a unified diff (from stdin, from a named revision or range, or HEAD
+when stdin is a terminal), asks an LLM to drop everything not worth reading, and
+prints the abridged diff plus a one-line summary.
 
 Flags:
   -model string   Model to use (default $MEAT_MODEL or a built-in default).
@@ -120,7 +125,16 @@ func readDiff(args []string) (string, string, error) {
 	}
 	if len(args) == 1 {
 		rev := args[0]
-		out, err := git("show", "--format=fuller", rev)
+		// A range (A..B or A...B) is a diff across commits; a single revision
+		// is one commit. `git show` on a range emits per-commit output, not the
+		// single aggregate diff we want, so dispatch ranges to `git diff`.
+		var out string
+		var err error
+		if isRevRange(rev) {
+			out, err = git("diff", rev)
+		} else {
+			out, err = git("show", "--format=fuller", rev)
+		}
 		if err != nil {
 			return "", rev, fmt.Errorf("reading %q: %w", rev, err)
 		}
@@ -139,6 +153,13 @@ func readDiff(args []string) (string, string, error) {
 		return "", "HEAD", fmt.Errorf("reading HEAD (are you in a git repo?): %w", err)
 	}
 	return out, "HEAD", nil
+}
+
+// isRevRange reports whether rev uses git's range syntax (A..B or A...B), as
+// opposed to a single revision. Such ranges are diffed with `git diff`, not
+// summarized with `git show`.
+func isRevRange(rev string) bool {
+	return strings.Contains(rev, "..")
 }
 
 func git(args ...string) (string, error) {

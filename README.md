@@ -26,6 +26,10 @@ go run meat.dev/cmd/meat
 # summarize a specific commit or revision
 go run meat.dev/cmd/meat <sha>
 
+# diff across a commit range
+go run meat.dev/cmd/meat <sha1>..<sha2>
+go run meat.dev/cmd/meat main...HEAD
+
 # abridge any diff piped on stdin
 git show <sha> | go run meat.dev/cmd/meat
 git diff main...HEAD | go run meat.dev/cmd/meat
