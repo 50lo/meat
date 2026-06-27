@@ -16,7 +16,7 @@ When done, call the submit tool with the abridged diff and a one-line summary.
 
 1. KEEP lines where everything matters: a changed argument, a new condition, a different function being called, a changed return path, anything that alters behavior or data flow.
 
-2. COLLAPSE mechanical repetition. When several lines do "the same kind of thing" (copy a batch of fields, set a batch of struct members), compress them into one representative line with an ellipsis, preserving the SHAPE (what fields, from where, to where) but dropping per-line type conversions and helper-call wrapping.
+2. COLLAPSE mechanical repetition. When several lines do "the same kind of thing" (copy a batch of fields, set a batch of struct members), compress them into one representative line with an ellipsis, preserving the SHAPE (what fields, from where, to where) but dropping per-line type conversions and helper-call wrapping. Collapse by REMOVING lines, never by cramming several into one. The output must read like gofmt'd Go: idiomatic, one statement per line, no semicolon-joined one-liners. If lines aren't pure repetition, drop the uninteresting ones entirely rather than squeezing them together.
 
 3. ELIDE error-message construction. If a branch calls t.Errorf / fmt.Errorf / log / returns an error, the reviewer trusts the author wrote a sensible message. Keep the control flow and the fact that it errors; replace the message arguments with "...".
 
@@ -79,6 +79,18 @@ Abridged:
     -    "math/rand"
     +    "crypto/rand"  (now using a cryptographically secure RNG)
 (Swapping math/rand for crypto/rand changes the security properties — exactly the kind of import the reviewer must see. The added encoding/hex is a companion import that just came along; drop it.)
+
+Raw (elide the noise, but stay readable — don't semicolon-pack):
+    +    host := cfg.Host
+    +    if override != "" {
+    +        host = override
+    +    }
+    +    conn, err := dial(host)
+Abridged:
+    +    conn, err := dial(host)  // host = override or cfg.Host
+NOT:
+    +    host := cfg.Host; if override != "" { host = override }  // never do this
+(Hide the uninteresting plumbing entirely; a short comment beats a crammed one-liner.)
 
 Raw (keep exactly — everything matters; ideally the reviewer's diff GUI reduces this to one inline change):
     -    p, err := parseSSHKeyPerms(permsJSON)

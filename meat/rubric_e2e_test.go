@@ -115,3 +115,70 @@ func TestRubric_ImportChoices(t *testing.T) {
 		}
 	})
 }
+
+// TestRubric_NoSemicolonPacking checks the readability rule: when eliding
+// uninteresting plumbing, the rubric must drop lines, not cram several
+// statements onto one with semicolons. Output should read like gofmt'd Go.
+func TestRubric_NoSemicolonPacking(t *testing.T) {
+	if os.Getenv("MEAT_E2E") != "1" {
+		t.Skip("set MEAT_E2E=1 to run the live-LLM rubric test")
+	}
+	ctx := context.Background()
+	m, err := NewAnthropicFromEnv(ctx, "")
+	if err != nil {
+		t.Skipf("no LLM available: %v", err)
+	}
+
+	const diff = `diff --git a/serve.go b/serve.go
+--- a/serve.go
++++ b/serve.go
+@@ -10,6 +10,15 @@
+ func Serve(cfg Config, override string) error {
++	host := cfg.Host
++	if override != "" {
++		host = override
++	}
++	port := cfg.Port
++	if port == 0 {
++		port = 8080
++	}
++	addr := fmt.Sprintf("%s:%d", host, port)
++	ln, err := net.Listen("tcp", addr)
++	if err != nil {
++		return err
++	}
+ 	return http.Serve(ln, cfg.Handler)
+ }
+`
+	res, err := Abridge(ctx, m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Guard against degenerate passes (empty or unabridged output): the
+	// meaningful action must survive, and the obvious plumbing must be elided.
+	if !strings.Contains(res.SmartDiff, "net.Listen") {
+		t.Errorf("meaningful line (net.Listen) was lost:\n%s", res.SmartDiff)
+	}
+	if strings.Contains(res.SmartDiff, "port = 8080") {
+		t.Errorf("obvious plumbing (port default) was not elided — diff looks unabridged:\n%s", res.SmartDiff)
+	}
+	// No line should pack multiple statements with an inner semicolon. (Go
+	// for-statement "for a; b; c" semicolons live on the same line as "for";
+	// flag any other added line carrying a ';'.)
+	for _, ln := range strings.Split(res.SmartDiff, "\n") {
+		if !strings.HasPrefix(ln, "+") {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(ln, "+"))
+		if strings.HasPrefix(body, "for ") {
+			continue
+		}
+		// Ignore semicolons inside a trailing // comment.
+		if i := strings.Index(body, "//"); i >= 0 {
+			body = body[:i]
+		}
+		if strings.Contains(body, ";") {
+			t.Errorf("semicolon-packed line (should drop lines, not cram them):\n%s\nfull:\n%s", ln, res.SmartDiff)
+		}
+	}
+}
