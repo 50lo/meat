@@ -12,11 +12,13 @@ import (
 
 // renderResult writes the result body (summary + diff) to w. When w is an
 // interactive terminal it mimics `git show`: colorize the diff with git's
-// configured diff colors and page through git's pager. Otherwise it writes
-// plain text (so pipes and redirects stay clean).
+// configured diff colors (honoring color.ui/color.diff) and page through git's
+// pager. Otherwise it writes plain text (so pipes and redirects stay clean).
 func renderResult(w io.Writer, res *meat.Result) {
-	body := formatBody(res, isTerminal(w))
-	if !isTerminal(w) {
+	tty := isTerminal(w)
+	color := tty && gitWantsColor(tty)
+	body := formatBody(res, palette(color))
+	if !tty {
 		io.WriteString(w, body)
 		return
 	}
@@ -26,12 +28,36 @@ func renderResult(w io.Writer, res *meat.Result) {
 	}
 }
 
-// formatBody renders summary + diff to a string, optionally with ANSI color.
-func formatBody(res *meat.Result, color bool) string {
+const ansiReset = "\x1b[m"
+
+// diffPalette holds the ANSI escapes for each unified-diff line kind, resolved
+// once per render (git's color.diff.<slot>). Empty strings mean "no color".
+type diffPalette struct {
+	meta, frag, old, new string
+}
+
+// palette resolves the diff colors. When color is false it returns the zero
+// palette (everything plain), so a single bool fully controls colorization.
+func palette(color bool) diffPalette {
+	if !color {
+		return diffPalette{}
+	}
+	return diffPalette{
+		meta: diffColor("meta", "bold"),
+		frag: diffColor("frag", "cyan"),
+		old:  diffColor("old", "red"),
+		new:  diffColor("new", "green"),
+	}
+}
+
+// formatBody renders summary + diff to a string using the given palette.
+func formatBody(res *meat.Result, p diffPalette) string {
 	var b strings.Builder
 	if res.Summary != "" {
-		if color {
-			fmt.Fprintf(&b, "%s# %s%s\n\n", diffColor("commit", "yellow"), res.Summary, ansiReset)
+		// git paints the commit header line; reuse the "frag"/meta family. We
+		// use a dedicated commit color (yellow) like `git show`.
+		if c := commitColor(p); c != "" {
+			fmt.Fprintf(&b, "%s# %s%s\n\n", c, res.Summary, ansiReset)
 		} else {
 			fmt.Fprintf(&b, "# %s\n\n", res.Summary)
 		}
@@ -41,42 +67,94 @@ func formatBody(res *meat.Result, color bool) string {
 		b.WriteString("(no meaningful change to read)\n")
 		return b.String()
 	}
-	if !color {
-		b.WriteString(diff)
-		b.WriteString("\n")
-		return b.String()
-	}
 	for _, line := range strings.Split(diff, "\n") {
-		b.WriteString(colorizeDiffLine(line))
+		b.WriteString(colorizeDiffLine(line, p))
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-const ansiReset = "\x1b[m"
+// commitColor returns the color for the summary header. It's only colored when
+// the palette is active (some slot is non-empty).
+func commitColor(p diffPalette) string {
+	if p == (diffPalette{}) {
+		return ""
+	}
+	return diffColor("commit", "yellow")
+}
 
-// colorizeDiffLine wraps a single unified-diff line in git's configured color
-// for its kind, matching how `git show` paints a diff.
-func colorizeDiffLine(line string) string {
-	var slot, def string
+// colorizeDiffLine wraps a unified-diff line in the palette color for its kind,
+// matching how `git show` paints a diff. An empty palette returns the line
+// unchanged. Metadata classification mirrors git's diff metadata lines
+// (headers, mode/rename/copy/similarity), so all of them get the meta color.
+func colorizeDiffLine(line string, p diffPalette) string {
+	var c string
 	switch {
-	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"),
-		strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "):
-		slot, def = "meta", "bold"
+	case isDiffMeta(line):
+		c = p.meta
 	case strings.HasPrefix(line, "@@"):
-		slot, def = "frag", "cyan"
+		c = p.frag
 	case strings.HasPrefix(line, "+"):
-		slot, def = "new", "green"
+		c = p.new
 	case strings.HasPrefix(line, "-"):
-		slot, def = "old", "red"
+		c = p.old
 	default:
 		return line // context line: no color
 	}
-	c := diffColor(slot, def)
 	if c == "" {
 		return line
 	}
 	return c + line + ansiReset
+}
+
+// isDiffMeta reports whether line is git diff metadata (painted with the meta
+// color by `git show`). "+++"/"---" file headers count as meta, but they must be
+// checked before the generic +/- line coloring.
+func isDiffMeta(line string) bool {
+	if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
+		return true
+	}
+	for _, p := range diffMetaPrefixes {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// diffMetaPrefixes are the non-+++/--- metadata line starts git colors as meta.
+var diffMetaPrefixes = []string{
+	"diff ",
+	"index ",
+	"old mode ",
+	"new mode ",
+	"new file mode ",
+	"deleted file mode ",
+	"similarity index ",
+	"dissimilarity index ",
+	"rename from ",
+	"rename to ",
+	"copy from ",
+	"copy to ",
+}
+
+// gitWantsColor asks git whether color.diff should be enabled, given whether
+// stdout is a tty. This honors color.ui / color.diff = always/auto/never just
+// like `git show` does, rather than always coloring on a tty.
+func gitWantsColor(tty bool) bool {
+	arg := "false"
+	if tty {
+		arg = "true"
+	}
+	// With an explicit stdout-is-tty argument, --get-colorbool prints
+	// "true"/"false" and exits 0; we parse the text. (The exit-status form only
+	// applies when the argument is omitted, in which case git probes its own
+	// stdout, which here is a pipe.)
+	out, err := exec.Command("git", "config", "--get-colorbool", "color.diff", arg).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
 }
 
 // diffColor returns the ANSI escape git would use for color.diff.<slot>,
@@ -120,16 +198,13 @@ func gitPager() string {
 	return strings.TrimSpace(string(out))
 }
 
-// isTerminal reports whether w is an interactive terminal (os.Stdout backed by
-// a char device). Non-*os.File writers (e.g. test buffers) are never terminals.
+// isTerminal reports whether w is an interactive terminal. It uses a real
+// isatty(3) ioctl rather than a char-device check, so redirecting to /dev/null
+// (also a char device) is correctly treated as non-interactive, matching git.
 func isTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
 		return false
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	return isatty(f.Fd())
 }

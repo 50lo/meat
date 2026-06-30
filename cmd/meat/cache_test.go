@@ -98,7 +98,7 @@ func newOpts(t *testing.T, diff, model string, compute func() (*meat.Result, err
 			calls++
 			return compute()
 		},
-		render: func(res *meat.Result) { out.WriteString(formatBody(res, false)) },
+		render: func(res *meat.Result) { out.WriteString(formatBody(res, palette(false))) },
 		stderr: &out,
 	}
 	return o, &calls, &out
