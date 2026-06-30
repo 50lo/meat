@@ -52,6 +52,9 @@ prints the abridged diff plus a one-line summary.
 Results are cached under ~/.meat keyed by the SHA of (model + diff contents),
 so re-running on an unchanged diff is instant; any edit to the diff recomputes.
 
+On an interactive terminal the diff is colored and paged like git show (using
+your git pager and color.diff config); piped/redirected output stays plain.
+
 Flags:
   -model string   Model to use (default $MEAT_MODEL or a built-in default).
   -no-cache       Ignore any cached result and recompute (still updates cache).
@@ -112,8 +115,10 @@ func main() {
 		cacheDir: cacheDir(),
 		noCache:  *noCache,
 		compute:  compute,
-		stdout:   os.Stdout,
-		stderr:   os.Stderr,
+		// On an interactive terminal, render like `git show`: git's diff colors
+		// and git's pager. Otherwise (piped/redirected) print plain text.
+		render: func(res *meat.Result) { renderResult(os.Stdout, res) },
+		stderr: os.Stderr,
 	}
 	if err := run(context.Background(), opts); err != nil {
 		fatal("%v", err)
@@ -131,8 +136,9 @@ type runOpts struct {
 	// compute produces a fresh result on a cache miss. The real implementation
 	// constructs the LLM-backed model; it must only be called on a miss.
 	compute func(ctx context.Context) (*meat.Result, error)
-	stdout  io.Writer
-	stderr  io.Writer
+	// render emits the result body (summary + diff) to the user.
+	render func(*meat.Result)
+	stderr io.Writer
 }
 
 // run is the cache-aware core: look up by SHA of (model + diff); on a hit,
@@ -143,7 +149,7 @@ func run(ctx context.Context, o runOpts) error {
 	key := cacheKey(o.diff, o.model)
 	if !o.noCache {
 		if res, ok := cacheLoad(o.cacheDir, key); ok {
-			printResult(o.stdout, res)
+			o.render(res)
 			fmt.Fprintf(o.stderr, "\nmeat: cached (sha %s)\n", key[:12])
 			return nil
 		}
@@ -156,21 +162,9 @@ func run(ctx context.Context, o runOpts) error {
 
 	cacheStore(o.cacheDir, key, res)
 
-	printResult(o.stdout, res)
+	o.render(res)
 	fmt.Fprintf(o.stderr, "\nmeat: tokens in=%d out=%d\n", res.InputTokens, res.OutputTokens)
 	return nil
-}
-
-// printResult writes the abridged reading diff (summary + diff) to w.
-func printResult(w io.Writer, res *meat.Result) {
-	if res.Summary != "" {
-		fmt.Fprintf(w, "# %s\n\n", res.Summary)
-	}
-	if strings.TrimSpace(res.SmartDiff) == "" {
-		fmt.Fprintln(w, "(no meaningful change to read)")
-	} else {
-		fmt.Fprintln(w, strings.TrimRight(res.SmartDiff, "\n"))
-	}
 }
 
 // readDiff returns the diff to abridge. Precedence:

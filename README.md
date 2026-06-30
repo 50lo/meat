@@ -48,6 +48,11 @@ diff contents. Re-running on an unchanged diff is instant; any edit to the diff
 changes the key and recomputes. Pass `-no-cache` to force a recompute, set
 `MEAT_CACHE` to use a different directory, or `MEAT_CACHE=` to disable caching.
 
+On an interactive terminal `meat` renders like `git show`: the diff is colored
+with your git diff colors and shown through your git pager. Piped or redirected
+output stays plain text. Honors `GIT_PAGER`/`core.pager`/`PAGER` and the
+`color.diff.*` config.
+
 With no stdin pipe, `meat` reads the top commit (`git show HEAD`) of the repo
 you're in and summarizes it.
 
