@@ -1,5 +1,18 @@
 package meat
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
+
+// RubricHash returns a short content hash of the abridging rubric (the system
+// prompt). Callers that cache Abridge results should mix it into their cache
+// key so tuning the rubric invalidates stale cached abridgements.
+func RubricHash() string {
+	h := sha256.Sum256([]byte(systemPrompt))
+	return hex.EncodeToString(h[:8])
+}
+
 // systemPrompt is the rubric the agent follows. It is intentionally a single
 // string constant: this is the one knob we expect to tune over time as we
 // discover new categories of noise. Keep the worked examples concrete — they

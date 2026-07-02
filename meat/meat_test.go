@@ -187,3 +187,14 @@ func TestAbridge_ProgressCallbacks(t *testing.T) {
 		}
 	}
 }
+
+// TestRubricHash is stable within a build and mixes the rubric content.
+func TestRubricHash(t *testing.T) {
+	h := RubricHash()
+	if len(h) != 16 {
+		t.Errorf("RubricHash() = %q, want 16 hex chars", h)
+	}
+	if h != RubricHash() {
+		t.Error("RubricHash is not deterministic")
+	}
+}
