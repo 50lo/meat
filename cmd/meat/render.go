@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -10,14 +11,29 @@ import (
 	"meat.dev/meat"
 )
 
+// jsonResult is the -json wire form: the Result plus the machine-computed
+// elision manifest.
+type jsonResult struct {
+	meat.Result
+	Elision string `json:"elision,omitempty"`
+}
+
+// renderJSON writes the result as a single JSON object. No color, no pager,
+// stable snake_case keys — for CI bots and other tooling.
+func renderJSON(w io.Writer, res *meat.Result, elision string) {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.Encode(jsonResult{Result: *res, Elision: elision})
+}
+
 // renderResult writes the result body (summary + diff) to w. When w is an
 // interactive terminal it mimics `git show`: colorize the diff with git's
 // configured diff colors (honoring color.ui/color.diff) and page through git's
 // pager. Otherwise it writes plain text (so pipes and redirects stay clean).
-func renderResult(w io.Writer, res *meat.Result) {
+func renderResult(w io.Writer, res *meat.Result, elision string) {
 	tty := isTerminal(w)
 	color := tty && gitWantsColor(tty)
-	body := formatBody(res, palette(color))
+	body := formatBody(res, elision, palette(color))
 	if !tty {
 		io.WriteString(w, body)
 		return
@@ -50,17 +66,27 @@ func palette(color bool) diffPalette {
 	}
 }
 
-// formatBody renders summary + diff to a string using the given palette.
-func formatBody(res *meat.Result, p diffPalette) string {
+// formatBody renders summary + elision manifest + diff to a string using the
+// given palette. elision is the machine-computed "kept X/Y changed lines"
+// line (may be empty).
+func formatBody(res *meat.Result, elision string, p diffPalette) string {
 	var b strings.Builder
 	if res.Summary != "" {
 		// git paints the commit header line; reuse the "frag"/meta family. We
 		// use a dedicated commit color (yellow) like `git show`.
 		if c := commitColor(p); c != "" {
-			fmt.Fprintf(&b, "%s# %s%s\n\n", c, res.Summary, ansiReset)
+			fmt.Fprintf(&b, "%s# %s%s\n", c, res.Summary, ansiReset)
 		} else {
-			fmt.Fprintf(&b, "# %s\n\n", res.Summary)
+			fmt.Fprintf(&b, "# %s\n", res.Summary)
 		}
+	}
+	if elision != "" {
+		// The manifest is computed locally from the two diffs — not by the
+		// LLM — so the reviewer can always see how much they are not reading.
+		fmt.Fprintf(&b, "# %s\n", elision)
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
 	}
 	diff := strings.TrimRight(res.SmartDiff, "\n")
 	if strings.TrimSpace(diff) == "" {

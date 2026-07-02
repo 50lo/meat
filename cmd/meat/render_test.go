@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +18,7 @@ var coloredP = diffPalette{meta: "\x1b[1m", frag: "\x1b[36m", old: "\x1b[31m", n
 
 func TestFormatBodyPlain(t *testing.T) {
 	res := &meat.Result{Summary: "did a thing", SmartDiff: "@@ -1 +1 @@\n-old\n+new\n"}
-	got := formatBody(res, diffPalette{})
+	got := formatBody(res, "", diffPalette{})
 	want := "# did a thing\n\n@@ -1 +1 @@\n-old\n+new\n"
 	if got != want {
 		t.Errorf("formatBody(plain) =\n%q\nwant\n%q", got, want)
@@ -28,7 +30,7 @@ func TestFormatBodyPlain(t *testing.T) {
 
 func TestFormatBodyEmptyDiff(t *testing.T) {
 	for _, p := range []diffPalette{{}, coloredP} {
-		got := formatBody(&meat.Result{Summary: "s"}, p)
+		got := formatBody(&meat.Result{Summary: "s"}, "", p)
 		if !strings.Contains(got, "no meaningful change") {
 			t.Errorf("palette %+v: empty diff should say so, got %q", p, got)
 		}
@@ -133,7 +135,7 @@ func TestRenderResultToFileIsPlain(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := &meat.Result{Summary: "s", SmartDiff: "@@ x @@\n+a\n-b\n"}
-	renderResult(f, res)
+	renderResult(f, res, "kept 2/9 changed lines")
 	f.Close()
 
 	got, err := os.ReadFile(p)
@@ -145,6 +147,9 @@ func TestRenderResultToFileIsPlain(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "+a") || !strings.Contains(string(got), "# s") {
 		t.Errorf("redirected output missing content:\n%s", got)
+	}
+	if !strings.Contains(string(got), "# kept 2/9 changed lines") {
+		t.Errorf("redirected output missing elision manifest:\n%s", got)
 	}
 }
 
@@ -167,5 +172,40 @@ func TestGitWantsColorHonorsConfig(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_0", "always")
 	if !gitWantsColor(false) {
 		t.Error("color.diff=always should enable color even when not a tty")
+	}
+}
+
+// TestRenderJSON pins the -json wire form: one JSON object, snake_case keys,
+// including the machine-computed elision manifest, no ANSI.
+func TestRenderJSON(t *testing.T) {
+	var buf bytes.Buffer
+	res := &meat.Result{
+		SmartDiff:    "@@ x @@\n+a\n",
+		Summary:      "did <a> thing",
+		InputTokens:  10,
+		OutputTokens: 2,
+	}
+	renderJSON(&buf, res, "kept 1/5 changed lines")
+
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("-json output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	for k, want := range map[string]any{
+		"smart_diff":    "@@ x @@\n+a\n",
+		"summary":       "did <a> thing", // SetEscapeHTML(false): '<' not \u003c
+		"input_tokens":  float64(10),
+		"output_tokens": float64(2),
+		"elision":       "kept 1/5 changed lines",
+	} {
+		if got[k] != want {
+			t.Errorf("json[%q] = %v, want %v", k, got[k], want)
+		}
+	}
+	if strings.Contains(buf.String(), "\x1b[") {
+		t.Error("json output must contain no ANSI escapes")
+	}
+	if strings.Contains(buf.String(), `\u003c`) {
+		t.Error("json output should not HTML-escape (SetEscapeHTML(false))")
 	}
 }

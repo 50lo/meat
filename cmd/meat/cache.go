@@ -23,16 +23,17 @@ func cacheDir() string {
 	return filepath.Join(home, ".meat")
 }
 
-// cacheKey is the content hash that names a cached result. It covers the inputs
-// a user changes between runs — the diff text and the model id — so editing the
-// diff yields a different key and recomputes, while an identical re-run hits the
-// cache. It deliberately does NOT version the rubric/agent code: after upgrading
-// meat itself, stale entries can be dropped with `rm -rf ~/.meat` (or -no-cache).
-func cacheKey(diff, model string) string {
+// cacheKey is the content hash that names a cached result. It covers every
+// input that shapes the answer: the diff text, the model id, and the rubric
+// (via its hash) — so editing the diff, switching models, or upgrading meat to
+// a tuned rubric all miss the cache and recompute, while an identical re-run
+// hits.
+func cacheKey(diff, model, rubric string) string {
 	h := sha256.New()
-	// Length-prefix-free but unambiguous: a NUL separator can't appear in a
-	// model id and is vanishingly unlikely to matter for diffs; we still hash
-	// both fields so a model change misses the cache.
+	// NUL separators keep field boundaries unambiguous: a NUL can't appear in
+	// a model id or rubric hash and is vanishingly unlikely to matter for diffs.
+	h.Write([]byte(rubric))
+	h.Write([]byte{0})
 	h.Write([]byte(model))
 	h.Write([]byte{0})
 	h.Write([]byte(diff))

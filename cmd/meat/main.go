@@ -16,6 +16,10 @@
 //	meat <sha1>..<sha2>
 //	meat main...HEAD
 //
+//	# staged / unstaged changes
+//	meat -staged
+//	meat -w
+//
 //	# abridge any diff piped on stdin
 //	git show <sha> | meat
 //	git diff main...HEAD | meat
@@ -32,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"meat.dev/meat"
 )
@@ -42,6 +47,8 @@ Usage:
   meat                 Summarize the most recent commit (HEAD) in the current git repo.
   meat <revision>      Summarize a specific commit or revision (e.g. a sha, HEAD~3).
   meat <range>         Diff across a commit range (e.g. sha1..sha2, main...HEAD).
+  meat -staged         Abridge the staged (index) changes: git diff --staged.
+  meat -w              Abridge the unstaged working-tree changes: git diff.
   git show <sha> | meat   Abridge the diff piped on stdin.
   git diff | meat         Abridge the working-tree diff piped on stdin.
 
@@ -49,8 +56,9 @@ meat reads a unified diff (from stdin, from a named revision or range, or HEAD
 when stdin is a terminal), asks an LLM to drop everything not worth reading, and
 prints the abridged diff plus a one-line summary.
 
-Results are cached under ~/.meat keyed by the SHA of (model + diff contents),
-so re-running on an unchanged diff is instant; any edit to the diff recomputes.
+Results are cached under ~/.meat keyed by the SHA of (rubric version + model +
+diff contents), so re-running on an unchanged diff is instant; editing the
+diff, switching models, or upgrading meat's rubric recomputes.
 
 On an interactive terminal the diff is colored and paged like git show (using
 your git pager and color.diff config); piped/redirected output stays plain.
@@ -58,6 +66,9 @@ your git pager and color.diff config); piped/redirected output stays plain.
 Flags:
   -model string   Model to use (default $MEAT_MODEL or a built-in default).
   -no-cache       Ignore any cached result and recompute (still updates cache).
+  -staged         Read the staged changes (git diff --staged).
+  -w              Read the unstaged working-tree changes (git diff).
+  -json           Emit the result as JSON on stdout (no color, no pager).
   -h, --help      Show this help.
 
 Environment:
@@ -77,6 +88,9 @@ func main() {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	model := fs.String("model", "", "model to use (default $MEAT_MODEL or built-in default)")
 	noCache := fs.Bool("no-cache", false, "ignore any cached result and recompute (still updates the cache)")
+	staged := fs.Bool("staged", false, "read the staged changes (git diff --staged)")
+	worktree := fs.Bool("w", false, "read the unstaged working-tree changes (git diff)")
+	jsonOut := fs.Bool("json", false, "emit the result as JSON on stdout")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag already printed the error and (for -h) the usage.
 		if err == flag.ErrHelp {
@@ -85,12 +99,24 @@ func main() {
 		os.Exit(2)
 	}
 
-	diff, source, err := readDiff(fs.Args())
+	diff, source, err := readDiff(fs.Args(), *staged, *worktree)
 	if err != nil {
 		fatal("%v", err)
 	}
 	if strings.TrimSpace(diff) == "" {
 		fatal("no diff to read (%s)", source)
+	}
+
+	// Progress feedback is strictly interactive: only when BOTH stdout and
+	// stderr are terminals (so `meat > file` and `meat 2> log` stay clean),
+	// and never in -json mode.
+	progress := func(string) {}
+	interactive := !*jsonOut && isTerminal(os.Stdout) && isTerminal(os.Stderr)
+	if interactive {
+		progress = func(msg string) {
+			// Overwrite a single status line on stderr; cleared before render.
+			fmt.Fprintf(os.Stderr, "\r\x1b[Kmeat: %s", msg)
+		}
 	}
 
 	// compute produces a fresh result on a cache miss. It is a closure so run()
@@ -106,21 +132,38 @@ func main() {
 		return meat.Abridge(ctx, m, meat.Request{
 			RepoRoot:    gitRoot(),
 			UnifiedDiff: diff,
+			Progress:    progress,
 		})
+	}
+
+	render := func(res *meat.Result) {
+		if interactive {
+			fmt.Fprint(os.Stderr, "\r\x1b[K") // clear the progress line
+		}
+		elision := meat.ElisionLine(diff, res.SmartDiff)
+		if *jsonOut {
+			renderJSON(os.Stdout, res, elision)
+			return
+		}
+		// On an interactive terminal, render like `git show`: git's diff colors
+		// and git's pager. Otherwise (piped/redirected) print plain text.
+		renderResult(os.Stdout, res, elision)
 	}
 
 	opts := runOpts{
 		diff:     diff,
 		model:    meat.ResolveModel(*model),
+		rubric:   meat.RubricHash(),
 		cacheDir: cacheDir(),
 		noCache:  *noCache,
 		compute:  compute,
-		// On an interactive terminal, render like `git show`: git's diff colors
-		// and git's pager. Otherwise (piped/redirected) print plain text.
-		render: func(res *meat.Result) { renderResult(os.Stdout, res) },
-		stderr: os.Stderr,
+		render:   render,
+		stderr:   os.Stderr,
 	}
 	if err := run(context.Background(), opts); err != nil {
+		if interactive {
+			fmt.Fprint(os.Stderr, "\r\x1b[K")
+		}
 		fatal("%v", err)
 	}
 }
@@ -131,6 +174,7 @@ func main() {
 type runOpts struct {
 	diff     string
 	model    string // already resolved (post $MEAT_MODEL/default)
+	rubric   string // rubric hash, part of the cache key
 	cacheDir string
 	noCache  bool
 	// compute produces a fresh result on a cache miss. The real implementation
@@ -146,7 +190,7 @@ type runOpts struct {
 // need no credentials); on a miss, compute, store, and print. -no-cache skips
 // the read but still writes through.
 func run(ctx context.Context, o runOpts) error {
-	key := cacheKey(o.diff, o.model)
+	key := cacheKey(o.diff, o.model, o.rubric)
 	if !o.noCache {
 		if res, ok := cacheLoad(o.cacheDir, key); ok {
 			o.render(res)
@@ -155,25 +199,48 @@ func run(ctx context.Context, o runOpts) error {
 		}
 	}
 
+	start := time.Now()
 	res, err := o.compute(ctx)
 	if err != nil {
 		return err
 	}
+	elapsed := time.Since(start).Round(100 * time.Millisecond)
 
 	cacheStore(o.cacheDir, key, res)
 
 	o.render(res)
-	fmt.Fprintf(o.stderr, "\nmeat: tokens in=%d out=%d\n", res.InputTokens, res.OutputTokens)
+	fmt.Fprintf(o.stderr, "\nmeat: tokens in=%d out=%d in %s\n", res.InputTokens, res.OutputTokens, elapsed)
 	return nil
 }
 
 // readDiff returns the diff to abridge. Precedence:
+//   - -staged / -w: the index or working-tree diff;
 //   - an explicit revision argument: `git show` of that revision;
 //   - stdin, when piped;
 //   - otherwise `git show` of the top commit (HEAD) in the current repo.
 //
 // The second return value names the source for error messages.
-func readDiff(args []string) (string, string, error) {
+func readDiff(args []string, staged, worktree bool) (string, string, error) {
+	if staged && worktree {
+		return "", "", fmt.Errorf("-staged and -w are mutually exclusive")
+	}
+	if (staged || worktree) && len(args) > 0 {
+		return "", "", fmt.Errorf("-staged/-w cannot be combined with a revision argument")
+	}
+	if staged {
+		out, err := git("diff", "--staged")
+		if err != nil {
+			return "", "staged", fmt.Errorf("reading staged changes: %w", err)
+		}
+		return out, "staged; nothing staged?", nil
+	}
+	if worktree {
+		out, err := git("diff")
+		if err != nil {
+			return "", "worktree", fmt.Errorf("reading working-tree changes: %w", err)
+		}
+		return out, "worktree; no unstaged changes?", nil
+	}
 	if len(args) > 1 {
 		return "", "", fmt.Errorf("too many arguments: want at most one revision, got %d", len(args))
 	}
@@ -187,7 +254,7 @@ func readDiff(args []string) (string, string, error) {
 		if isRevRange(rev) {
 			out, err = git("diff", rev)
 		} else {
-			out, err = git("show", "--format=fuller", rev)
+			out, err = gitShow(rev)
 		}
 		if err != nil {
 			return "", rev, fmt.Errorf("reading %q: %w", rev, err)
@@ -202,11 +269,19 @@ func readDiff(args []string) (string, string, error) {
 		return string(data), "stdin", nil
 	}
 	// No pipe and no revision: summarize the top commit.
-	out, err := git("show", "--format=fuller", "HEAD")
+	out, err := gitShow("HEAD")
 	if err != nil {
 		return "", "HEAD", fmt.Errorf("reading HEAD (are you in a git repo?): %w", err)
 	}
 	return out, "HEAD", nil
+}
+
+// gitShow shows one commit's diff. Plain `git show` on a merge commit emits NO
+// diff (so meat would report "no diff to read"); -m --first-parent makes a
+// merge show its diff against the first parent — i.e. "what did merging this
+// branch change on main" — and leaves regular commits untouched.
+func gitShow(rev string) (string, error) {
+	return git("show", "--format=fuller", "-m", "--first-parent", rev)
 }
 
 // isRevRange reports whether rev uses git's range syntax (A..B or A...B), as

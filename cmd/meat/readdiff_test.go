@@ -48,7 +48,7 @@ func TestReadDiffRevisionArg(t *testing.T) {
 	run("add", "b.txt")
 	run("commit", "-q", "-m", "second commit: add b.txt")
 
-	diff, source, err := readDiff([]string{sha})
+	diff, source, err := readDiff([]string{sha}, false, false)
 	if err != nil {
 		t.Fatalf("readDiff(%q): %v", sha, err)
 	}
@@ -102,7 +102,7 @@ func TestReadDiffRevRange(t *testing.T) {
 	run("commit", "-q", "-m", "second commit: add b.txt")
 
 	for _, rng := range []string{base + "..HEAD", base + "...HEAD"} {
-		diff, source, err := readDiff([]string{rng})
+		diff, source, err := readDiff([]string{rng}, false, false)
 		if err != nil {
 			t.Fatalf("readDiff(%q): %v", rng, err)
 		}
@@ -132,14 +132,131 @@ func TestReadDiffBadRevision(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	if _, _, err := readDiff([]string{"deadbeef"}); err == nil {
+	if _, _, err := readDiff([]string{"deadbeef"}, false, false); err == nil {
 		t.Fatal("readDiff with unknown revision: want error, got nil")
 	}
 }
 
 // TestReadDiffTooManyArgs rejects more than one revision.
 func TestReadDiffTooManyArgs(t *testing.T) {
-	if _, _, err := readDiff([]string{"a", "b"}); err == nil {
+	if _, _, err := readDiff([]string{"a", "b"}, false, false); err == nil {
 		t.Fatal("readDiff with two args: want error, got nil")
+	}
+}
+
+// TestReadDiffMergeCommit: plain `git show` on a merge commit emits no diff at
+// all, which used to make meat report "no diff to read". The first-parent diff
+// (what merging the branch changed on main) must come through.
+func TestReadDiffMergeCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not found: %v", err)
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	write("a.txt", "base\n")
+	run("add", "a.txt")
+	run("commit", "-q", "-m", "base")
+	run("checkout", "-q", "-b", "feature")
+	write("feat.txt", "feature work\n")
+	run("add", "feat.txt")
+	run("commit", "-q", "-m", "feature commit")
+	run("checkout", "-q", "main")
+	write("main.txt", "main work\n")
+	run("add", "main.txt")
+	run("commit", "-q", "-m", "main commit")
+	run("merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+
+	diff, _, err := readDiff(nil, false, false) // HEAD is the merge
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, "feat.txt") {
+		t.Errorf("merge commit produced no first-parent diff (feat.txt missing):\n%s", diff)
+	}
+	if !strings.Contains(diff, "merge feature") {
+		t.Errorf("merge commit metadata missing:\n%s", diff)
+	}
+}
+
+// TestReadDiffStagedAndWorktree exercises -staged (index vs HEAD) and -w
+// (working tree vs index) against a real repo.
+func TestReadDiffStagedAndWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not found: %v", err)
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	if err := os.WriteFile("a.txt", []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "a.txt")
+	run("commit", "-q", "-m", "v1")
+
+	// Stage one change, then make a further unstaged edit.
+	if err := os.WriteFile("a.txt", []byte("v2 staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "a.txt")
+	if err := os.WriteFile("a.txt", []byte("v3 worktree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stagedDiff, _, err := readDiff(nil, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stagedDiff, "v2 staged") || strings.Contains(stagedDiff, "v3 worktree") {
+		t.Errorf("-staged should show index-vs-HEAD only:\n%s", stagedDiff)
+	}
+
+	wtDiff, _, err := readDiff(nil, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wtDiff, "v3 worktree") || strings.Contains(wtDiff, "-v1") {
+		t.Errorf("-w should show worktree-vs-index only:\n%s", wtDiff)
+	}
+}
+
+// TestReadDiffFlagConflicts rejects nonsensical flag combinations.
+func TestReadDiffFlagConflicts(t *testing.T) {
+	if _, _, err := readDiff(nil, true, true); err == nil {
+		t.Error("-staged with -w: want error")
+	}
+	if _, _, err := readDiff([]string{"HEAD"}, true, false); err == nil {
+		t.Error("-staged with a revision: want error")
+	}
+	if _, _, err := readDiff([]string{"HEAD"}, false, true); err == nil {
+		t.Error("-w with a revision: want error")
 	}
 }

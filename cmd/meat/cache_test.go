@@ -12,27 +12,32 @@ import (
 	"meat.dev/meat"
 )
 
-func TestCacheKeyDependsOnDiffAndModel(t *testing.T) {
-	base := cacheKey("diff A", "model-1")
+func TestCacheKeyDependsOnDiffModelAndRubric(t *testing.T) {
+	base := cacheKey("diff A", "model-1", "rubric-1")
 
-	if base != cacheKey("diff A", "model-1") {
+	if base != cacheKey("diff A", "model-1", "rubric-1") {
 		t.Fatal("cacheKey is not deterministic")
 	}
-	if base == cacheKey("diff B", "model-1") {
+	if base == cacheKey("diff B", "model-1", "rubric-1") {
 		t.Error("changing the diff did not change the key")
 	}
-	if base == cacheKey("diff A", "model-2") {
+	if base == cacheKey("diff A", "model-2", "rubric-1") {
 		t.Error("changing the model did not change the key")
 	}
+	// Rubric versioning: tuning the rubric (a meat upgrade) must invalidate
+	// stale cached abridgements.
+	if base == cacheKey("diff A", "model-1", "rubric-2") {
+		t.Error("changing the rubric did not change the key")
+	}
 	// Guard against a naive concatenation collision: ("a","b") vs ("a\x00b","").
-	if cacheKey("a", "b") == cacheKey("a\x00b", "") {
+	if cacheKey("a", "b", "r") == cacheKey("a\x00b", "", "r") {
 		t.Error("model/diff boundary is ambiguous (concatenation collision)")
 	}
 }
 
 func TestCacheRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	key := cacheKey("some diff", "m")
+	key := cacheKey("some diff", "m", "r")
 	want := &meat.Result{
 		SmartDiff:    "+ kept line\n",
 		Summary:      "a summary",
@@ -54,7 +59,7 @@ func TestCacheRoundTrip(t *testing.T) {
 }
 
 func TestCacheDisabledWithEmptyDir(t *testing.T) {
-	key := cacheKey("d", "m")
+	key := cacheKey("d", "m", "r")
 	// Storing to "" is a no-op and loading from "" always misses.
 	cacheStore("", key, &meat.Result{Summary: "x"})
 	if _, ok := cacheLoad("", key); ok {
@@ -64,7 +69,7 @@ func TestCacheDisabledWithEmptyDir(t *testing.T) {
 
 func TestCacheMissOnCorruptEntry(t *testing.T) {
 	dir := t.TempDir()
-	key := cacheKey("d", "m")
+	key := cacheKey("d", "m", "r")
 	if err := os.WriteFile(filepath.Join(dir, key+".json"), []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -93,12 +98,13 @@ func newOpts(t *testing.T, diff, model string, compute func() (*meat.Result, err
 	o := &runOpts{
 		diff:     diff,
 		model:    model,
+		rubric:   "test-rubric",
 		cacheDir: t.TempDir(),
 		compute: func(context.Context) (*meat.Result, error) {
 			calls++
 			return compute()
 		},
-		render: func(res *meat.Result) { out.WriteString(formatBody(res, palette(false))) },
+		render: func(res *meat.Result) { out.WriteString(formatBody(res, "", palette(false))) },
 		stderr: &out,
 	}
 	return o, &calls, &out
@@ -119,6 +125,10 @@ func TestRunCacheHitSkipsCompute(t *testing.T) {
 	}
 	if *calls != 1 {
 		t.Fatalf("first run: compute called %d times, want 1", *calls)
+	}
+	// A fresh compute reports token usage and elapsed wall-clock time.
+	if !strings.Contains(out.String(), "tokens in=7 out=3 in ") {
+		t.Errorf("fresh run should report tokens and elapsed time:\n%s", out.String())
 	}
 
 	// Second run with compute that would FAIL if called: proves the hit path
@@ -149,7 +159,7 @@ func TestRunNoCacheBypassesReadButWritesThrough(t *testing.T) {
 	o, calls, out := newOpts(t, diff, model, func() (*meat.Result, error) { return fresh, nil })
 
 	// Pre-seed a stale entry.
-	cacheStore(o.cacheDir, cacheKey(diff, model), &meat.Result{Summary: "stale"})
+	cacheStore(o.cacheDir, cacheKey(diff, model, o.rubric), &meat.Result{Summary: "stale"})
 
 	o.noCache = true
 	if err := run(context.Background(), *o); err != nil {
@@ -162,7 +172,7 @@ func TestRunNoCacheBypassesReadButWritesThrough(t *testing.T) {
 		t.Errorf("-no-cache served stale result:\n%s", out.String())
 	}
 	// The write-through should have refreshed the entry.
-	if got, ok := cacheLoad(o.cacheDir, cacheKey(diff, model)); !ok || got.Summary != "fresh" {
+	if got, ok := cacheLoad(o.cacheDir, cacheKey(diff, model, o.rubric)); !ok || got.Summary != "fresh" {
 		t.Errorf("cache not refreshed after -no-cache run: %+v ok=%v", got, ok)
 	}
 }
@@ -174,7 +184,7 @@ func TestRunComputeErrorPropagates(t *testing.T) {
 	if err := run(context.Background(), *o); err == nil {
 		t.Fatal("expected error from failing compute")
 	}
-	if _, ok := cacheLoad(o.cacheDir, cacheKey("d", "m")); ok {
+	if _, ok := cacheLoad(o.cacheDir, cacheKey("d", "m", o.rubric)); ok {
 		t.Error("failed compute should not populate the cache")
 	}
 }
