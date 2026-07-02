@@ -21,6 +21,7 @@ package meat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -35,6 +36,12 @@ const defaultMaxTurns = 24
 // run can't hang forever.
 const defaultBudget = 4 * time.Minute
 
+// maxDiffBytes bounds the size of a diff accepted in one Abridge call. The
+// whole diff is sent to the model up front (and re-sent every turn), so a huge
+// diff would blow the context window — better to refuse with advice than to
+// fail with a raw API error deep into the run.
+const maxDiffBytes = 400 << 10 // ~400 KB ≈ 100k+ tokens of code
+
 // Request is a whole-diff abridgement request. The diff may span many files;
 // abridging the whole change at once (rather than file by file) lets the model
 // reason across files and gives it maximum context to decide what is
@@ -48,18 +55,23 @@ type Request struct {
 	UnifiedDiff string
 	// MaxTurns overrides defaultMaxTurns when > 0.
 	MaxTurns int
+	// Progress, when non-nil, receives short human-readable status updates as
+	// the run proceeds (one per model turn and per tool call). Callers use it
+	// for interactive feedback; it must not block.
+	Progress func(msg string)
 }
 
-// Result is the abridged reading diff.
+// Result is the abridged reading diff. The json tags give embedders and the
+// CLI's -json output a stable snake_case wire form.
 type Result struct {
 	// SmartDiff is the abridged unified diff. Empty when no meaningful change
 	// remains after abridging.
-	SmartDiff string
+	SmartDiff string `json:"smart_diff"`
 	// Summary is a one-line, high-level description of the change.
-	Summary string
+	Summary string `json:"summary"`
 	// InputTokens and OutputTokens are the cumulative token usage across the run.
-	InputTokens  int
-	OutputTokens int
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
 }
 
 // Abridge runs the agent loop that turns req.UnifiedDiff into a reading diff,
@@ -70,6 +82,9 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	}
 	if strings.TrimSpace(req.UnifiedDiff) == "" {
 		return &Result{Summary: "No changes."}, nil
+	}
+	if len(req.UnifiedDiff) > maxDiffBytes {
+		return nil, fmt.Errorf("meat: diff is %dKB, over the %dKB limit — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(req.UnifiedDiff)>>10, maxDiffBytes>>10)
 	}
 
 	maxTurns := req.MaxTurns
@@ -88,9 +103,15 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 		Content: []Block{textBlock(buildUserPrompt(req))},
 	}}
 
+	progress := req.Progress
+	if progress == nil {
+		progress = func(string) {}
+	}
+
 	var inTok, outTok int
 
 	for turn := 0; turn < maxTurns; turn++ {
+		progress(fmt.Sprintf("thinking (turn %d)", turn+1))
 		resp, err := model.Generate(ctx, systemPrompt, messages, tools)
 		if err != nil {
 			return nil, fmt.Errorf("meat: model generate: %w", err)
@@ -105,6 +126,7 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 			if b.Type != "tool_use" {
 				continue
 			}
+			progress(describeToolCall(b))
 			out, isErr := tb.run(ctx, b.ToolName, b.ToolInput)
 			results = append(results, Block{
 				Type:       "tool_result",
@@ -153,4 +175,27 @@ func buildUserPrompt(req Request) string {
 	}
 	b.WriteString("```\n")
 	return b.String()
+}
+
+// describeToolCall renders a tool_use block as a short progress message, e.g.
+// "read_file cmd/meat/main.go" or "grep \"func Foo\"".
+func describeToolCall(b Block) string {
+	switch b.ToolName {
+	case "read_file":
+		var in struct {
+			Path string `json:"path"`
+		}
+		json.Unmarshal(b.ToolInput, &in)
+		return strings.TrimSpace("read_file " + in.Path)
+	case "grep":
+		var in struct {
+			Pattern string `json:"pattern"`
+		}
+		json.Unmarshal(b.ToolInput, &in)
+		return strings.TrimSpace(fmt.Sprintf("grep %q", in.Pattern))
+	case "submit":
+		return "submitting"
+	default:
+		return b.ToolName
+	}
 }

@@ -144,3 +144,46 @@ func TestToolboxGrepAndPathConfinement(t *testing.T) {
 		t.Errorf("want path traversal rejected")
 	}
 }
+
+// TestAbridge_RejectsOversizeDiff: a diff over the size cap must be refused up
+// front with actionable advice, never sent to the model.
+func TestAbridge_RejectsOversizeDiff(t *testing.T) {
+	m := &scriptedModel{turns: []*Response{assistant()}}
+	big := "diff --git a/x b/x\n+" + strings.Repeat("x", maxDiffBytes)
+	_, err := Abridge(context.Background(), m, Request{UnifiedDiff: big})
+	if err == nil {
+		t.Fatal("want error for oversize diff")
+	}
+	if !strings.Contains(err.Error(), "narrower") {
+		t.Errorf("error should advise narrowing the range: %v", err)
+	}
+	if m.seen != 0 {
+		t.Errorf("oversize diff must not reach the model; got %d calls", m.seen)
+	}
+}
+
+// TestAbridge_ProgressCallbacks: the Progress hook receives a turn update and a
+// message per tool call, so an interactive caller can show liveness.
+func TestAbridge_ProgressCallbacks(t *testing.T) {
+	repo := gitRepo(t, map[string]string{"a.go": "package a\n"})
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("t1", "read_file", readFileInput{Path: "a.go"})),
+		assistant(toolUse("t2", "grep", grepInput{Pattern: "package"})),
+		assistant(toolUse("t3", "submit", submission{SmartDiff: "", Summary: "s"})),
+	}}
+	var msgs []string
+	_, err := Abridge(context.Background(), m, Request{
+		RepoRoot:    repo,
+		UnifiedDiff: "diff --git a/a.go b/a.go\n@@\n+x\n",
+		Progress:    func(msg string) { msgs = append(msgs, msg) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(msgs, "\n")
+	for _, want := range []string{"turn 1", "read_file a.go", `grep "package"`, "submitting"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("progress messages missing %q:\n%s", want, joined)
+		}
+	}
+}
