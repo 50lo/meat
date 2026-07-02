@@ -38,6 +38,11 @@ func ResolveModel(model string) string {
 	return model
 }
 
+// maxOutputTokens is the per-turn output cap sent to the API. Large enough for
+// a sizable abridged diff in a single submit call; a response that still stops
+// at max_tokens is reported as an error rather than silently truncated.
+const maxOutputTokens = 16384
+
 // implicitGatewayKey is the placeholder API key sent to the exe.dev LLM
 // gateway. The gateway injects the real managed credential at the network edge,
 // so no provider key needs to live on the VM.
@@ -107,8 +112,9 @@ type antTool struct {
 }
 
 type antResp struct {
-	Content []antBlock `json:"content"`
-	Usage   struct {
+	Content    []antBlock `json:"content"`
+	StopReason string     `json:"stop_reason"`
+	Usage      struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
@@ -126,7 +132,7 @@ func (m *AnthropicModel) Generate(ctx context.Context, system string, messages [
 
 	reqBody := antReq{
 		Model:     cmpOr(m.Model, DefaultAnthropicModel),
-		MaxTokens: 8192,
+		MaxTokens: maxOutputTokens,
 		System:    system,
 		Messages:  toAntMessages(messages),
 		Tools:     toAntTools(tools),
@@ -137,29 +143,13 @@ func (m *AnthropicModel) Generate(ctx context.Context, system string, messages [
 	}
 
 	url := strings.TrimRight(cmpOr(m.BaseURL, "https://api.anthropic.com"), "/") + "/v1/messages"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-api-key", m.APIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
 	client := m.HTTPC
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
-	httpResp, err := client.Do(req)
+	raw, err := postWithRetry(ctx, client, url, m.APIKey, body)
 	if err != nil {
 		return nil, err
-	}
-	defer httpResp.Body.Close()
-	raw, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic API %d: %s", httpResp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 
 	var resp antResp
@@ -168,6 +158,12 @@ func (m *AnthropicModel) Generate(ctx context.Context, system string, messages [
 	}
 	if resp.Error != nil {
 		return nil, fmt.Errorf("anthropic error: %s: %s", resp.Error.Type, resp.Error.Message)
+	}
+	// A max_tokens stop means the reply was cut off mid-thought — likely inside
+	// a tool_use JSON block. Using it would silently produce (and cache) a
+	// truncated abridgement, so fail loudly instead.
+	if resp.StopReason == "max_tokens" {
+		return nil, fmt.Errorf("anthropic response truncated at max_tokens (%d); the diff may be too large to abridge in one pass", maxOutputTokens)
 	}
 
 	out := &Response{
@@ -183,6 +179,71 @@ func (m *AnthropicModel) Generate(ctx context.Context, system string, messages [
 		}
 	}
 	return out, nil
+}
+
+// maxAttempts bounds retries of a single API call (1 initial + retries).
+const maxAttempts = 4
+
+// retryBaseDelay is the first backoff step (doubled each retry). A var so
+// tests can shrink it.
+var retryBaseDelay = time.Second
+
+// postWithRetry POSTs body to the Anthropic messages endpoint, retrying
+// transient failures (429 rate limits, 5xx including Anthropic's 529
+// overloaded_error, and transport errors) with exponential backoff. It returns
+// the raw response body on the first 200. Non-retryable statuses (4xx other
+// than 408/429) fail immediately — retrying a bad request can't help.
+func postWithRetry(ctx context.Context, client *http.Client, url, apiKey string, body []byte) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			// 1s, 2s, 4s — modest; the Abridge wall-clock budget is the real cap.
+			delay := retryBaseDelay << (attempt - 1)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+
+		httpResp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lastErr = err // transport error: retry
+			continue
+		}
+		raw, err := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if httpResp.StatusCode == http.StatusOK {
+			return raw, nil
+		}
+		lastErr = fmt.Errorf("anthropic API %d: %s", httpResp.StatusCode, strings.TrimSpace(string(raw)))
+		if !retryableStatus(httpResp.StatusCode) {
+			return nil, lastErr
+		}
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// retryableStatus reports whether an HTTP status is worth retrying: request
+// timeout, rate limiting, and server-side failures (Anthropic uses 529 for
+// overloaded_error).
+func retryableStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
 }
 
 func toAntTools(tools []Tool) []antTool {
