@@ -11,6 +11,21 @@ The exact live responses are checked in beside this report as `.live.json`; the
 The existing `.golden.diff` files are hand-reviewed, compiler-rendered reference
 outputs, not the live model output.
 
+Snapshot provenance: Meat source commit
+`1760979d508f94d9d1e69b863272a0f51d44af10`, rubric hash
+`42593d94b5993cea`, and the exact upstream revisions named below. The command
+pattern was to build `./cmd/meat`, make the upstream checkout the process working
+directory, then run:
+
+```sh
+/path/to/meat -no-cache -json < /path/to/python-only-commit.diff
+```
+
+The JSON files are the captured stdout. Token counts are inside them; elapsed
+wall times are recorded below. Because `-no-cache` invokes a stochastic model,
+the setup is replayable but the exact prose and plan are not expected to be
+byte-for-byte reproducible.
+
 ## Headline
 
 Meat consistently found the semantic center of all three commits. It also
@@ -26,7 +41,8 @@ call-site churn.
 | **Corpus** | **411** | **291 (70.8%)** | **120 (29.2%)** | **722** | **532 (73.7%)** | **30.1%** | **194 changed / 340 rows** |
 
 The live runs used 471,501 aggregate input tokens and 16,144 output tokens over
-233.8 seconds. The high input count includes the multi-turn tool-assisted repo
+233.8 seconds: Django 108.7 seconds, Flask 80.3 seconds, and pytest 44.8
+seconds. The high input count includes the multi-turn tool-assisted repo
 inspection, not only the three diff payloads.
 
 ## Django: header token normalization and cache behavior
@@ -89,8 +105,9 @@ wildcard, a tab case, a comma/semicolon boundary, and the custom-separator
 outcome.
 
 **Suggested live target:** about **85–90/178 changed rows**, around 155 physical
-rows. That is 25–30% shorter than this live run while preserving more useful
-stimulus than the live output currently shows.
+rows. That is 20–24% fewer changed rows and about 33% fewer physical rows than
+this live run, while preserving more useful stimulus than the live output
+currently shows.
 
 ## Flask: session access tracking moves to the request context
 

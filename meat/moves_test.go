@@ -395,6 +395,8 @@ func TestAbridge_RejectsAsymmetricMoveThenAcceptsCorrection(t *testing.T) {
 	initialPrompt := m.seenMessages[0][0].Content[0].Text
 	if !strings.Contains(initialPrompt, "-6..9 ↔ +16..19") ||
 		!strings.Contains(initialPrompt, "Mandatory hiding wins before move enforcement") ||
+		!strings.Contains(initialPrompt, "keep/remove/fold/replace treatment") ||
+		!strings.Contains(initialPrompt, "equivalent local elisions") ||
 		!strings.Contains(initialPrompt, "asymmetric plans are rejected") {
 		t.Fatalf("initial prompt missing move hint:\n%s", initialPrompt)
 	}
@@ -410,5 +412,47 @@ func TestAbridge_RejectsAsymmetricMoveThenAcceptsCorrection(t *testing.T) {
 	}
 	if !sawPreciseError {
 		t.Fatalf("corrective turn did not receive precise paired coordinates: %+v", m.seenMessages[1])
+	}
+}
+
+func TestAbridge_RejectsAsymmetricMoveReplacementThenAcceptsCorrection(t *testing.T) {
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("asymmetric-replace", "submit", submission{
+			Remove: []lineRange{},
+			Replace: []lineReplacement{
+				{Line: 8, Old: "beta", New: "..."},
+			},
+			Fold: []lineFold{}, Summary: "Moves processing to the new location.",
+		})),
+		assistant(toolUse("symmetric-replace", "submit", submission{
+			Remove: []lineRange{},
+			Replace: []lineReplacement{
+				{Line: 8, Old: "beta", New: "..."},
+				{Line: 18, Old: "beta", New: "..."},
+			},
+			Fold: []lineFold{}, Summary: "Moves processing to the new location.",
+		})),
+	}}
+
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: exactMoveDiff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.seen != 2 || strings.Count(res.SmartDiff, "publish(...)") != 2 {
+		t.Fatalf("corrected replacement result turns=%d:\n%s", m.seen, res.SmartDiff)
+	}
+
+	var sawPreciseError bool
+	for _, message := range m.seenMessages[1] {
+		for _, block := range message.Content {
+			if block.Type == "tool_result" && block.ToolError &&
+				strings.Contains(block.ToolResult, "removed lines 6-9 match added lines 16-19") &&
+				strings.Contains(block.ToolResult, "corresponding kept lines 8 and 18 have different model-authored local elisions") {
+				sawPreciseError = true
+			}
+		}
+	}
+	if !sawPreciseError {
+		t.Fatalf("corrective turn did not receive precise local-elision coordinates: %+v", m.seenMessages[1])
 	}
 }
