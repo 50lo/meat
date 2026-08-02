@@ -35,6 +35,14 @@ import (
 // change should be reviewed in narrower pieces anyway.
 const maxTotalDiffBytes = 4 << 20
 
+// maxChunks bounds how many chunks one diff may split into. A diff under
+// maxTotalDiffBytes needs roughly maxTotalDiffBytes/maxDiffBytes chunks plus
+// splitting overhead; far more than that means pathological amplification
+// (e.g. an enormous replicated metadata block leaving almost no body budget
+// per piece), where memory and per-chunk agent runs would grow without
+// useful output.
+const maxChunks = 32
+
 // diffChunk is one independently abridgeable slice of the original diff.
 type diffChunk struct {
 	// text is a well-formed unified diff for this slice.
@@ -91,12 +99,18 @@ type chunkBuilder struct {
 	// line endings, so any span's single-run size is O(1) to check.
 	prefixText []int
 	prefixRaw  []int
-	// hidden marks lines the mandatory import pass removes. Mid-hunk cuts
-	// treat a contiguous hidden run as atomic, so a multiline import block is
-	// never severed from its opener: each chunk's own import pass must see
-	// whole blocks to hide them.
+	// hidden marks lines the mandatory import pass removes. splitHunk drops
+	// them from segment bodies: a segment's own compiler could not classify a
+	// severed block, and dropped rows could never appear in a result anyway.
 	hidden []bool
-	chunks []diffChunk
+	// inString marks lines whose lexical position (on either diff side) is
+	// inside a multiline string literal — a Go/JS backtick string or a
+	// Python/Java triple-quoted string. Mid-hunk cuts never land on such a
+	// line: a segment starting inside a literal would make the chunk-local
+	// compiler misread the closing delimiter as an opener, misclassifying
+	// embedded imports and string boundaries.
+	inString []bool
+	chunks   []diffChunk
 }
 
 // splitDiffForAbridging cuts raw into chunks that each fit budget both as raw
@@ -115,6 +129,7 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 		prefixText: make([]int, len(lines)+1),
 		prefixRaw:  make([]int, len(lines)+1),
 		hidden:     mandatoryRemovalMask(len(lines), mandatoryImportRemovalPlan(lines, layout)),
+		inString:   stringInteriorMask(lines, layout),
 	}
 	for i, l := range lines {
 		b.prefixText[i+1] = b.prefixText[i] + len(l.text)
@@ -149,7 +164,40 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 		}
 	}
 	flush()
+	if len(b.chunks) > maxChunks {
+		return nil, fmt.Errorf("diff splits into %d chunks (limit %d) — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(b.chunks), maxChunks)
+	}
 	return b.chunks, nil
+}
+
+// stringInteriorMask marks lines whose lexical position on either diff side
+// begins inside a multiline string literal, using the same per-hunk, per-side
+// scan as the mandatory import pass so the splitter and the chunk-local
+// compiler agree about what is embedded source.
+func stringInteriorMask(lines []sourceLine, layout diffLayout) []bool {
+	mask := make([]bool, len(lines))
+	for hunk, kind := range layout.kinds {
+		if kind != diffLineHunkHeader {
+			continue
+		}
+		end := nextLayoutLine(layout, hunk+1, func(k diffLineKind) bool {
+			return k == diffLineHeader || k == diffLineOldFile || k == diffLineHunkHeader || k == diffLineMailSignature
+		})
+		language := layout.language[hunk]
+		if language == sourceLanguageUnknown {
+			continue
+		}
+		for _, side := range []byte{'-', '+'} {
+			sideLines := importLinesForSide(lines, layout, hunk+1, end, side)
+			flags := embeddedSourceLines(sideLines, language)
+			for k, sl := range sideLines {
+				if flags[k] {
+					mask[sl.index] = true
+				}
+			}
+		}
+	}
+	return mask
 }
 
 // sections partitions the diff into per-file spans. Any preamble before the
@@ -222,10 +270,23 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 	meta := lineSpan{start: metaStart, end: firstHunk}
 	metaText := b.rangeText(meta.start, meta.end)
 
+	// The section tail: lines after the last hunk-body line (a format-patch
+	// mail signature, version trailer, or stray prose). It is not part of any
+	// hunk's split accounting; it is re-attached to the section's final piece
+	// so identity abridgement preserves it byte-for-byte.
+	tailStart := s.end
+	for tailStart > firstHunk {
+		kind := b.layout.kinds[tailStart-1]
+		if isHunkSource(kind) || kind == diffLineNoNewline || kind == diffLineHunkHeader {
+			break
+		}
+		tailStart--
+	}
+
 	var hunks []lineSpan
-	for i := firstHunk; i < s.end; {
+	for i := firstHunk; i < tailStart; {
 		j := i + 1
-		for j < s.end && b.layout.kinds[j] != diffLineHunkHeader {
+		for j < tailStart && b.layout.kinds[j] != diffLineHunkHeader {
 			j++
 		}
 		hunks = append(hunks, lineSpan{start: i, end: j})
@@ -287,6 +348,17 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 		}
 	}
 	flush()
+
+	if tailStart < s.end && piece > 0 {
+		// Re-attach the tail to the section's final piece, re-checking the
+		// piece still fits the single-run budget with it.
+		last := &b.chunks[len(b.chunks)-1]
+		candidate := last.text + b.rangeText(tailStart, s.end)
+		if !fitsSingleRun(candidate, b.budget) {
+			return fmt.Errorf("cannot fit the diff trailer at line %d into a chunk under the size limit — try a narrower diff (per-file with `git diff -- <path> | meat`)", tailStart+1)
+		}
+		last.text = candidate
+	}
 	return nil
 }
 
@@ -295,21 +367,23 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 // starts continue the original ranges by the rows consumed before the segment
 // (a zero-count side names the line before the gap, per unified-diff
 // convention) and counts match the emitted body exactly, so every piece
-// passes hunk-count validation. A no-newline marker always travels with the
-// source line that owns it.
+// passes hunk-count validation.
 //
-// Segments pre-apply the whole-diff mandatory import mask: rows the import
-// pass hides are dropped from the emitted text (with header counts and start
-// offsets accounting for them). A segment's own compiler cannot re-derive
-// those removals — a cut can sever an import block or embedded-string opener
-// from the rows that identify it — and dropped rows could never appear in a
-// result anyway. For the same reason the original hunk heading is carried
-// only by a segment that starts at the true top of the hunk body: replicated
-// onto later segments, a heading like a function or import opener would
-// describe context the segment does not actually start inside. Segments left
-// with no changed rows (context only, or import-only after the drop) are not
-// emitted; the whole-diff compiler would never retain them against an empty
-// plan either.
+// Cut placement respects atomic units: a source line travels with its
+// no-newline markers and with every following line that begins inside a
+// multiline string literal, so a segment never starts inside an embedded
+// string whose closing delimiter a chunk-local compiler would misread as an
+// opener. Segments pre-apply the whole-diff mandatory import mask: rows the
+// import pass hides are dropped from the emitted text (with header counts
+// covering exactly the emitted rows and start offsets accounting for dropped
+// ones). A segment's own compiler cannot re-derive those removals — a cut
+// can sever an import block from the rows that identify it — and dropped
+// rows could never appear in a result anyway. For the same reason the
+// original hunk heading is carried only by a segment that starts at the true
+// top of the hunk body: replicated elsewhere, a heading such as an import
+// opener would describe context the segment does not start inside. Segments
+// left with no changed rows (context-only, or import-only after the drop)
+// are not emitted; no plan could retain a change-free hunk either.
 func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string)) error {
 	oldStart, oldZero, newStart, newZero, heading := parseHunkHeaderForSplit(b.lines[h.start].text)
 	headerEOL := b.lines[h.start].eol
@@ -318,93 +392,71 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 	}
 	bodyStart, bodyEnd := h.start+1, h.end
 
-	// unitEnd returns the end of the atomic unit starting at line i: the line
-	// plus any no-newline markers bound to it.
+	// unitEnd returns the end of the atomic unit starting at line i.
 	unitEnd := func(i int) int {
 		j := i + 1
-		for j < bodyEnd && b.layout.kinds[j] == diffLineNoNewline {
+		for j < bodyEnd && (b.layout.kinds[j] == diffLineNoNewline || b.inString[j]) {
 			j++
 		}
 		return j
-	}
-	unitRows := func(start, end int) (uo, un int) {
-		for i := start; i < end; i++ {
-			if !isHunkSource(b.layout.kinds[i]) || len(b.lines[i].text) == 0 {
-				continue
-			}
-			switch b.lines[i].text[0] {
-			case ' ':
-				uo++
-				un++
-			case '-':
-				uo++
-			case '+':
-				un++
-			}
-		}
-		return uo, un
 	}
 
 	oldOff, newOff := 0, 0
 	atBodyStart := true
 	i := bodyStart
 	for i < bodyEnd {
-		if b.hidden[i] {
-			next := unitEnd(i)
-			uo, un := unitRows(i, next)
-			oldOff += uo
-			newOff += un
-			i = next
-			atBodyStart = false
-			continue
-		}
-
+		segStarted := false
 		segHeading := ""
-		if atBodyStart {
-			segHeading = heading
-		}
-		segOldStart, segNewStart := oldStart+oldOff, newStart+newOff
-		segOld, segNew := 0, 0
+		var segOldStart, segNewStart int
+		segVisOld, segVisNew := 0, 0
 		segTextLen, segRawLen, segCount := 0, 0, 0
 		var spans []lineSpan
 		hasChange := false
 		for i < bodyEnd {
-			if b.hidden[i] {
-				// Dropped inside the segment: advances original coordinates
-				// but contributes no text, rows, or budget.
-				next := unitEnd(i)
-				uo, un := unitRows(i, next)
-				oldOff += uo
-				newOff += un
+			next := unitEnd(i)
+			u := b.unitStats(i, next)
+			if u.count == 0 {
+				// Fully dropped unit: advances original coordinates only.
+				oldOff += u.dropOld
+				newOff += u.dropNew
+				atBodyStart = false
 				i = next
 				continue
 			}
-			next := unitEnd(i)
-			uo, un := unitRows(i, next)
-			header := synthHunkHeader(segOldStart, segOld+uo, oldZero, segNewStart, segNew+un, newZero, segHeading)
+			if !segStarted {
+				segOldStart, segNewStart = oldStart+oldOff, newStart+newOff
+				if atBodyStart {
+					segHeading = heading
+				}
+				segStarted = true
+			}
+			header := synthHunkHeader(segOldStart, segVisOld+u.visOld, oldZero, segNewStart, segVisNew+u.visNew, newZero, segHeading)
 			pt, pr, pc := prefixSizes()
-			t, r, c := b.spanSizes(i, next)
-			if !b.fits(pt+len(header)+segTextLen+t, pr+len(header)+len(headerEOL)+segRawLen+r, pc+1+segCount+c) {
+			if !b.fits(pt+len(header)+segTextLen+u.textLen, pr+len(header)+len(headerEOL)+segRawLen+u.rawLen, pc+1+segCount+u.count) {
 				break
 			}
-			if b.layout.kinds[i] == diffLineHunkChange {
-				hasChange = true
+			segVisOld += u.visOld
+			segVisNew += u.visNew
+			segTextLen += u.textLen
+			segRawLen += u.rawLen
+			segCount += u.count
+			oldOff += u.visOld + u.dropOld
+			newOff += u.visNew + u.dropNew
+			hasChange = hasChange || u.hasChange
+			for _, sp := range u.spans {
+				if n := len(spans); n > 0 && spans[n-1].end == sp.start {
+					spans[n-1].end = sp.end
+				} else {
+					spans = append(spans, sp)
+				}
 			}
-			segOld += uo
-			segNew += un
-			segTextLen += t
-			segRawLen += r
-			segCount += c
-			oldOff += uo
-			newOff += un
-			if n := len(spans); n > 0 && spans[n-1].end == i {
-				spans[n-1].end = next
-			} else {
-				spans = append(spans, lineSpan{start: i, end: next})
-			}
+			atBodyStart = false
 			i = next
 		}
-		atBodyStart = false
+		if !segStarted {
+			// Only dropped units remained; nothing more to emit.
+			break
+		}
 		if segCount == 0 {
 			return fmt.Errorf("cannot split the diff near line %d into a chunk under the size limit — try a narrower diff (per-file with `git diff -- <path> | meat`)", i+1)
 		}
@@ -412,7 +464,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 			continue
 		}
 		var sb strings.Builder
-		sb.WriteString(synthHunkHeader(segOldStart, segOld, oldZero, segNewStart, segNew, newZero, segHeading))
+		sb.WriteString(synthHunkHeader(segOldStart, segVisOld, oldZero, segNewStart, segVisNew, newZero, segHeading))
 		sb.WriteString(headerEOL)
 		for _, sp := range spans {
 			sb.WriteString(b.rangeText(sp.start, sp.end))
@@ -420,6 +472,53 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		emit(sb.String())
 	}
 	return nil
+}
+
+// unitInfo aggregates one atomic unit for splitHunk: sizes and per-side row
+// counts of its visible lines, per-side counts of its import-dropped lines,
+// the visible sub-spans to copy, and whether any visible row is a change.
+type unitInfo struct {
+	textLen, rawLen, count int
+	visOld, visNew         int
+	dropOld, dropNew       int
+	spans                  []lineSpan
+	hasChange              bool
+}
+
+func (b *chunkBuilder) unitStats(start, end int) unitInfo {
+	var u unitInfo
+	for i := start; i < end; i++ {
+		uo, un := 0, 0
+		if isHunkSource(b.layout.kinds[i]) && len(b.lines[i].text) > 0 {
+			switch b.lines[i].text[0] {
+			case ' ':
+				uo, un = 1, 1
+			case '-':
+				uo = 1
+			case '+':
+				un = 1
+			}
+		}
+		if b.hidden[i] {
+			u.dropOld += uo
+			u.dropNew += un
+			continue
+		}
+		u.visOld += uo
+		u.visNew += un
+		u.textLen += len(b.lines[i].text)
+		u.rawLen += len(b.lines[i].text) + len(b.lines[i].eol)
+		u.count++
+		if b.layout.kinds[i] == diffLineHunkChange {
+			u.hasChange = true
+		}
+		if n := len(u.spans); n > 0 && u.spans[n-1].end == i {
+			u.spans[n-1].end = i + 1
+		} else {
+			u.spans = append(u.spans, lineSpan{start: i, end: i + 1})
+		}
+	}
+	return u
 }
 
 // synthHunkHeader renders a segment's @@ header from its side starts and
@@ -512,6 +611,11 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 	chunks, err := splitDiffForAbridging(req.UnifiedDiff, singleRunDiffBytes)
 	if err != nil {
 		return nil, fmt.Errorf("meat: %w", err)
+	}
+	if len(chunks) == 0 {
+		// Every row was import scaffolding or change-free context — nothing
+		// any edit plan could retain. Report that without a model call.
+		return &Result{Summary: "Only imports and unchanged context; nothing to read."}, nil
 	}
 	progress := req.Progress
 	if progress == nil {

@@ -811,6 +811,140 @@ func TestAbridge_ChunkedEmbeddedImportsNeverLeak(t *testing.T) {
 	}
 }
 
+// TestSplitDiff_ChunkCountBounded: pathological amplification (a large
+// replicated metadata block leaving almost no per-piece body budget) must be
+// refused rather than exploding into hundreds of chunks and agent runs.
+func TestSplitDiff_ChunkCountBounded(t *testing.T) {
+	meta := "diff --git a/a b/a\n--- a/a\n+++ b/a\n"
+	var b strings.Builder
+	b.WriteString(meta)
+	const rows = 2000
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", rows)
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&b, "+row %d\n", i)
+	}
+	diff := b.String()
+	// A budget barely above the per-piece overhead forces one tiny segment
+	// per piece.
+	budget := len(numberedDiff(meta+"@@ -1998,0 +1998,1 @@\n+row 1999\n")) + 30
+	_, err := splitDiffForAbridging(diff, budget)
+	if err == nil || !strings.Contains(err.Error(), "narrower") {
+		t.Fatalf("err = %v, want chunk-count refusal with advice", err)
+	}
+}
+
+// TestAbridge_ChunkedPreservesFormatPatchTrailer: a format-patch mail
+// signature and version trailer after the last hunk must survive splitting;
+// identity abridgement reproduces the input byte-for-byte.
+func TestAbridge_ChunkedPreservesFormatPatchTrailer(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n")
+	for h := 0; h < 4; h++ {
+		fmt.Fprintf(&b, "@@ -%d,1 +%d,2 @@\n context %d\n+added %d\n", h*10+1, h*10+1, h, h)
+	}
+	b.WriteString("-- \n2.39.2\n\n")
+	diff := b.String()
+	budget := len(numberedDiff(diff))/2 + 60
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds rows.",
+	}))}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SmartDiff != diff {
+		t.Errorf("identity chunked abridgement altered the diff (trailer lost?):\ngot:\n%q\nwant:\n%q", res.SmartDiff, diff)
+	}
+}
+
+// TestAbridge_ChunkedNeverStartsSegmentInsideStringLiteral: a segment that
+// begins inside a multiline string would make the chunk-local compiler read
+// the CLOSING delimiter as an opener, misclassifying following host-language
+// rows as embedded source (and, e.g., hiding a behavioral require()). Cuts
+// must keep string interiors attached to their opener.
+func TestAbridge_ChunkedNeverStartsSegmentInsideStringLiteral(t *testing.T) {
+	meta := "diff --git a/plugin_test.go b/plugin_test.go\n--- a/plugin_test.go\n+++ b/plugin_test.go\n"
+	const pad = 8
+	var b strings.Builder
+	b.WriteString(meta)
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", pad+7)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&b, "+var pre%d = %d\n", i, i)
+	}
+	b.WriteString("+const fixture = `\n+import pytest\n+run_inside()\n+`\n+var outside = require(\"outside\")\n+func F() {}\n+var post = 1\n")
+	diff := b.String()
+
+	whole, err := compileEditPlan(diff, editPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(whole.smartDiff, `require("outside")`) {
+		t.Fatalf("whole-diff reference lost the behavioral require:\n%s", whole.smartDiff)
+	}
+
+	// Try budgets that would place a naive cut on each line of the string
+	// interior and just after it; none may lose the behavioral require row.
+	for _, mark := range []string{"+import pytest\n", "+run_inside()\n", "+`\n"} {
+		prefix := strings.SplitAfter(diff, mark)[0]
+		budget := len(numberedDiff(prefix))
+		restore := setSingleRunBudget(t, budget)
+		if fitsSingleRun(diff, budget) {
+			restore()
+			t.Fatalf("budget %d should force a split", budget)
+		}
+		m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds fixture.",
+		}))}}
+		res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+		restore()
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		if !strings.Contains(res.SmartDiff, `require("outside")`) {
+			t.Errorf("budget at %q: behavioral require lost from chunked result:\n%s", mark, res.SmartDiff)
+		}
+		if strings.Contains(res.SmartDiff, "import pytest") {
+			t.Errorf("budget at %q: embedded import leaked:\n%s", mark, res.SmartDiff)
+		}
+	}
+}
+
+// TestAbridge_ChunkedImportOnlyOversizeDiff: an oversized diff whose every
+// changed row is import scaffolding splits into zero chunks; the result says
+// so without any model call.
+func TestAbridge_ChunkedImportOnlyOversizeDiff(t *testing.T) {
+	meta := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n"
+	const rows = 40
+	var b strings.Builder
+	b.WriteString(meta)
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n+import (\n", rows+2)
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&b, "+\t%q\n", fmt.Sprintf("pkg/dep%02d", i))
+	}
+	b.WriteString("+)\n")
+	diff := b.String()
+	budget := len(numberedDiff(diff))/2 + 60
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+	m := &scriptedModel{turns: []*Response{assistant()}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.seen != 0 {
+		t.Errorf("import-only diff reached the model %d times, want 0", m.seen)
+	}
+	if res.SmartDiff != "" || res.Summary == "" {
+		t.Errorf("want empty diff with explanatory summary, got %+v", res)
+	}
+}
+
 func TestFitsSingleRun(t *testing.T) {
 	diff := "diff --git a/a b/a\n@@ -1 +1 @@\n+x\n"
 	if !fitsSingleRun(diff, len(numberedDiff(diff))) {
