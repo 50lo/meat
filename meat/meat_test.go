@@ -587,6 +587,46 @@ func TestSubmitTruncatesValidationErrors(t *testing.T) {
 	}
 }
 
+// TestPromptSurfaceStaysFrozen enforces the frozen prompt surface documented
+// on systemPrompt: compiler arbitration vocabulary (who owns an edit, which
+// pass wins, how derived plans are merged) must not leak into the system
+// prompt, the per-request user prompt, or tool descriptions. The model only
+// needs to know what to act on; conflict resolution is explained solely by
+// plan feedback when a specific plan hits a specific conflict.
+func TestPromptSurfaceStaysFrozen(t *testing.T) {
+	banned := []string{
+		"mandatory",
+		"compiler",
+		"precedence over",
+		"import precedence",
+		"hiding wins",
+		"wins before",
+		"counterpart",
+		"compiler-owned",
+		"arbitrat",
+	}
+
+	moveDiff := exactMoveDiff
+	surfaces := map[string]string{
+		"systemPrompt":         systemPrompt,
+		"userPrompt":           buildUserPrompt(Request{UnifiedDiff: moveDiff, RepoRoot: "/repo"}, numberedDiff(moveDiff)),
+		"userPrompt (no root)": buildUserPrompt(Request{UnifiedDiff: moveDiff}, numberedDiff(moveDiff)),
+	}
+	tb := &toolbox{root: "/repo", rawDiff: moveDiff}
+	for _, tool := range tb.tools() {
+		surfaces["tool "+tool.Name] = tool.Description + string(tool.InputSchema)
+	}
+
+	for name, text := range surfaces {
+		lower := strings.ToLower(text)
+		for _, word := range banned {
+			if strings.Contains(lower, word) {
+				t.Errorf("%s leaks compiler-internal vocabulary %q", name, word)
+			}
+		}
+	}
+}
+
 func TestBuildUserPromptNumbersOriginalDiff(t *testing.T) {
 	diff := "diff --git a/a b/a\n@@ -1 +1 @@\n+x"
 	prompt := buildUserPrompt(Request{UnifiedDiff: diff}, numberedDiff(diff))

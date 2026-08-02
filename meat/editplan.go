@@ -219,7 +219,7 @@ func compileEditPlan(raw string, in editPlan) (compiledPlan, error) {
 		}
 		if mandatoryLines > 0 {
 			if mandatoryLines != f.EndLine-f.StartLine+1 {
-				problems = append(problems, fmt.Errorf("fold[%d]: crosses mandatory import removal and non-import source rows in range %d-%d; fold only the behavioral rows", i, f.StartLine, f.EndLine))
+				problems = append(problems, fmt.Errorf("fold[%d]: crosses automatically removed import rows and behavioral rows in range %d-%d; fold only the behavioral rows", i, f.StartLine, f.EndLine))
 				foldsValid = false
 			}
 			// An import-only fold is redundant: mandatory removal wins and no

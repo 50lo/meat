@@ -59,7 +59,7 @@ func editPlanToolSchema(withSummary bool) json.RawMessage {
 func (tb *toolbox) previewPlanTool() Tool {
 	return Tool{
 		Name:        "preview_plan",
-		Description: "Validate a complete remove/replace/fold plan against the numbered ORIGINAL diff, merge Meat's mandatory source-derived import removals (including exact move counterparts), enforce symmetric model compression of remaining behavioral move rows, and preview the resulting reading diff with retention statistics. Large previews are explicitly truncated. Plans are never incremental.",
+		Description: "Validate a complete remove/replace/fold plan against the numbered ORIGINAL diff and preview the resulting reading diff with retention statistics. Imports are removed automatically and moved code must be treated symmetrically; the feedback reports anything that needs fixing. Large previews are explicitly truncated. Plans are never incremental.",
 		InputSchema: editPlanToolSchema(false),
 	}
 }
@@ -69,7 +69,7 @@ func (tb *toolbox) previewPlanTool() Tool {
 func (tb *toolbox) submitTool() Tool {
 	return Tool{
 		Name:        "submit",
-		Description: "Submit a final complete remove/replace/fold plan against the numbered ORIGINAL diff plus a one-line summary. Meat gives mandatory source-derived import hiding precedence (including exact move counterparts), rejects asymmetric model compression of remaining behavioral move rows, and applies the result locally; do not submit a rewritten diff.",
+		Description: "Submit a final complete remove/replace/fold plan against the numbered ORIGINAL diff plus a one-line summary. Meat applies the plan locally (removing imports automatically and rejecting asymmetric treatment of moved code); do not submit a rewritten diff.",
 		InputSchema: editPlanToolSchema(true),
 	}
 }
@@ -262,7 +262,7 @@ func planFeedback(compiled compiledPlan) string {
 	}
 	b.WriteString(".\n")
 	if len(compiled.moves) > 0 {
-		fmt.Fprintf(&b, "Moves: %d exact cross-hunk/cross-file span(s) checked after mandatory import precedence; behavioral compression is symmetric (%s).\n", len(compiled.moves), formatMovePairs(compiled.moves, maxMoveHints))
+		fmt.Fprintf(&b, "Moves: %d exact cross-hunk/cross-file span(s) treated symmetrically (%s).\n", len(compiled.moves), formatMovePairs(compiled.moves, maxMoveHints))
 	}
 	if retentionPressure(stats) {
 		b.WriteString("Pressure: high retention. Reconsider repeated rename/call-site hunks after one representative anchor, default git context, mechanical prose, duplicate setup/cases, and assertion batches or suites that can become fixed ... folds. Imports are already removed mechanically. For Python, keep each suite owner, required setup, and decisive stimulus/outcome: never hide a table assignment used by a retained loop, or an entire pytester.makeini/makeconftest configuration that defines the scenario. Move folds inside those boundaries. This is advisory: preserve every distinct contract, security or compatibility caveat, condition, lifecycle edge, transformation, effect, stimulus, and outcome.\n")

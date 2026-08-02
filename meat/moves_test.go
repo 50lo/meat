@@ -365,7 +365,7 @@ func TestPlanFeedback_ReportsSymmetricMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	feedback := planFeedback(compiled)
-	for _, want := range []string{"Moves: 1 exact cross-hunk/cross-file", "mandatory import precedence", "compression is symmetric", "-6..9 ↔ +16..19"} {
+	for _, want := range []string{"Moves: 1 exact cross-hunk/cross-file", "treated symmetrically", "-6..9 ↔ +16..19"} {
 		if !strings.Contains(feedback, want) {
 			t.Errorf("feedback missing %q:\n%s", want, feedback)
 		}
@@ -394,10 +394,9 @@ func TestAbridge_RejectsAsymmetricMoveThenAcceptsCorrection(t *testing.T) {
 
 	initialPrompt := m.seenMessages[0][0].Content[0].Text
 	if !strings.Contains(initialPrompt, "-6..9 ↔ +16..19") ||
-		!strings.Contains(initialPrompt, "Mandatory hiding wins before move enforcement") ||
 		!strings.Contains(initialPrompt, "keep/remove/fold/replace treatment") ||
 		!strings.Contains(initialPrompt, "equivalent local elisions") ||
-		!strings.Contains(initialPrompt, "asymmetric plans are rejected") {
+		!strings.Contains(initialPrompt, "Asymmetric plans are rejected") {
 		t.Fatalf("initial prompt missing move hint:\n%s", initialPrompt)
 	}
 	var sawPreciseError bool
