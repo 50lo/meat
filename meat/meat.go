@@ -13,7 +13,9 @@
 // carries meaning. Meat applies the plan to the immutable input itself, so the
 // model never authors the displayed diff wholesale. The agent has read-only
 // access to the surrounding source tree so it can use clues to decide what is
-// load-bearing.
+// load-bearing. A diff too large for one agent context is split at file and
+// hunk boundaries into independently valid chunks, abridged chunk by chunk,
+// and merged (see chunk.go).
 //
 // The package is provider-agnostic: callers supply a Model. The command
 // meat.dev ships built-in OpenAI Responses and Anthropic Messages models;
@@ -33,24 +35,30 @@ import (
 // allows a good deal of tool use while still terminating a runaway loop.
 const defaultMaxTurns = 24
 
-// defaultBudget bounds total wall-clock time for one Abridge call so a stuck
-// run can't hang forever.
+// defaultBudget bounds total wall-clock time for one agent run (the whole
+// diff, or one chunk of a split diff) so a stuck run can't hang forever.
 const defaultBudget = 4 * time.Minute
 
 // abridgeBudget is a variable so deadline/fallback behavior can be tested
 // without waiting for the production budget.
 var abridgeBudget = defaultBudget
 
-// maxDiffBytes bounds both the raw diff and its numbered form accepted in one
-// Abridge call. The numbered whole diff is sent up front (and re-sent every
-// turn), so a huge input would blow the context window — better to refuse with
-// advice than fail with a raw API error deep into the run.
+// maxDiffBytes bounds both the raw diff and its numbered form sent to one
+// agent run. The numbered whole diff is sent up front (and re-sent every
+// turn), so a bigger input would blow the context window. Diffs over this
+// limit are split into chunks at structural boundaries (see chunk.go) and
+// abridged one chunk per run.
 const maxDiffBytes = 400 << 10 // ~400 KB ≈ 100k+ tokens of code
+
+// singleRunDiffBytes is a variable so chunked-abridging tests can exercise
+// real splits with small fixtures instead of 400KB inputs.
+var singleRunDiffBytes = maxDiffBytes
 
 // Request is a whole-diff abridgement request. The diff may span many files;
 // abridging the whole change at once (rather than file by file) lets the model
 // reason across files and gives it maximum context to decide what is
-// load-bearing.
+// load-bearing. A diff too large for one model context is split at structural
+// boundaries and abridged chunk by chunk (see chunk.go).
 type Request struct {
 	// RepoRoot is the directory the read-only tools are confined to. If empty,
 	// the tools are disabled (the model abridges from the diff text alone).
@@ -61,8 +69,9 @@ type Request struct {
 	// MaxTurns overrides defaultMaxTurns when > 0.
 	MaxTurns int
 	// Progress, when non-nil, receives short human-readable status updates as
-	// the run proceeds (one per model turn and per tool call). Callers use it
-	// for interactive feedback; it must not block.
+	// the run proceeds (one per model turn and per tool call; chunked runs
+	// prefix each update with its chunk). Callers use it for interactive
+	// feedback; it must not block.
 	Progress func(msg string)
 }
 
@@ -85,8 +94,10 @@ type Result struct {
 // every model-visible string, it describes only what the model must do next.
 const noToolCallNudge = "Call preview_plan or submit with a complete remove/replace/fold plan against the numbered ORIGINAL diff. Prefer removals and fixed multiline folds; use replace only for a local single-line elision. If nothing meaningful changed, remove every original line."
 
-// Abridge runs the agent loop that turns req.UnifiedDiff into a reading diff,
-// using the supplied Model for all generation.
+// Abridge turns req.UnifiedDiff into a reading diff, using the supplied Model
+// for all generation. A diff that fits one agent run is abridged whole; a
+// larger diff (up to maxTotalDiffBytes) is split at structural boundaries and
+// abridged chunk by chunk, and the per-chunk results are merged.
 func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	if model == nil {
 		return nil, fmt.Errorf("meat: nil model")
@@ -94,16 +105,22 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	if strings.TrimSpace(req.UnifiedDiff) == "" {
 		return &Result{Summary: "No changes."}, nil
 	}
-	if len(req.UnifiedDiff) > maxDiffBytes {
-		return nil, fmt.Errorf("meat: diff is %dKB, over the %dKB limit — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(req.UnifiedDiff)>>10, maxDiffBytes>>10)
-	}
-	numbered := numberedDiff(req.UnifiedDiff)
-	if len(numbered) > maxDiffBytes {
-		return nil, fmt.Errorf("meat: numbered diff expands to %dKB, over the %dKB context limit — try a narrower range", len(numbered)>>10, maxDiffBytes>>10)
+	if len(req.UnifiedDiff) > maxTotalDiffBytes {
+		return nil, fmt.Errorf("meat: diff is %dMB, over the %dMB limit — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(req.UnifiedDiff)>>20, maxTotalDiffBytes>>20)
 	}
 	if err := validateSupportedDiff(req.UnifiedDiff); err != nil {
 		return nil, fmt.Errorf("meat: %w", err)
 	}
+	if !fitsSingleRun(req.UnifiedDiff, singleRunDiffBytes) {
+		return abridgeChunked(ctx, model, req)
+	}
+	return abridgeOne(ctx, model, req)
+}
+
+// abridgeOne runs the agent loop on one single-run-sized diff: the whole
+// input when it fits, or one chunk of a split diff.
+func abridgeOne(ctx context.Context, model Model, req Request) (*Result, error) {
+	numbered := numberedDiff(req.UnifiedDiff)
 
 	maxTurns := req.MaxTurns
 	if maxTurns <= 0 {

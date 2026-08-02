@@ -1,0 +1,59 @@
+package meat
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+// TestSplitDiff_RealWorldSanity is an opt-in check against an arbitrary
+// real-world diff supplied via CHUNK_SANITY_DIFF: at the production budget
+// and at several shrunken budgets, every chunk must fit, validate
+// independently, and jointly preserve every hunk source row in order. A
+// budget below the diff's longest physical line is skipped: single lines are
+// never split, so such budgets legitimately refuse.
+func TestSplitDiff_RealWorldSanity(t *testing.T) {
+	path := os.Getenv("CHUNK_SANITY_DIFF")
+	if path == "" {
+		t.Skip("set CHUNK_SANITY_DIFF to a large unified diff file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(data)
+	if err := validateSupportedDiff(raw); err != nil {
+		t.Fatalf("fixture invalid: %v", err)
+	}
+	longest := 0
+	for _, l := range splitSourceLines(raw) {
+		if len(l.text) > longest {
+			longest = len(l.text)
+		}
+	}
+	wantRows := strings.Join(chunkBodyRows(raw), "\n")
+	for _, budget := range []int{maxDiffBytes, 200 << 10, 64 << 10, 16 << 10} {
+		if budget < longest*2 {
+			t.Logf("budget %dKB skipped: longest line is %d bytes", budget>>10, longest)
+			continue
+		}
+		chunks, err := splitDiffForAbridging(raw, budget)
+		if err != nil {
+			t.Fatalf("budget %d: %v", budget, err)
+		}
+		var rows []string
+		for i, c := range chunks {
+			if !fitsSingleRun(c.text, budget) {
+				t.Errorf("budget %d chunk %d exceeds budget", budget, i)
+			}
+			if err := validateSupportedDiff(c.text); err != nil {
+				t.Errorf("budget %d chunk %d invalid: %v", budget, i, err)
+			}
+			rows = append(rows, chunkBodyRows(c.text)...)
+		}
+		if strings.Join(rows, "\n") != wantRows {
+			t.Errorf("budget %d: chunking lost or reordered hunk rows", budget)
+		}
+		t.Logf("raw %dKB, budget %dKB -> %d chunks", len(raw)>>10, budget>>10, len(chunks))
+	}
+}

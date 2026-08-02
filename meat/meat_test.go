@@ -3,6 +3,7 @@ package meat
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -361,11 +362,12 @@ func TestToolboxGrepAndPathConfinement(t *testing.T) {
 	}
 }
 
-// TestAbridge_RejectsOversizeDiff: a diff over the size cap must be refused up
-// front with actionable advice, never sent to the model.
+// TestAbridge_RejectsOversizeDiff: a diff over the total cap must be refused
+// up front with actionable advice, never sent to the model — chunking makes
+// large diffs feasible, not unbounded.
 func TestAbridge_RejectsOversizeDiff(t *testing.T) {
 	m := &scriptedModel{turns: []*Response{assistant()}}
-	big := "diff --git a/x b/x\n+" + strings.Repeat("x", maxDiffBytes)
+	big := "diff --git a/x b/x\n+" + strings.Repeat("x", maxTotalDiffBytes)
 	_, err := Abridge(context.Background(), m, Request{UnifiedDiff: big})
 	if err == nil {
 		t.Fatal("want error for oversize diff")
@@ -375,6 +377,25 @@ func TestAbridge_RejectsOversizeDiff(t *testing.T) {
 	}
 	if m.seen != 0 {
 		t.Errorf("oversize diff must not reach the model; got %d calls", m.seen)
+	}
+}
+
+// TestAbridge_RejectsUnsplittableOversizeDiff: a diff over the single-run
+// budget with no structural boundaries to split at must be refused with
+// actionable advice, never sent to the model.
+func TestAbridge_RejectsUnsplittableOversizeDiff(t *testing.T) {
+	m := &scriptedModel{turns: []*Response{assistant()}}
+	// One file section, no hunks: nothing to split at.
+	big := "diff --git a/x b/x\n+" + strings.Repeat("x", maxDiffBytes)
+	_, err := Abridge(context.Background(), m, Request{UnifiedDiff: big})
+	if err == nil {
+		t.Fatal("want error for unsplittable oversize diff")
+	}
+	if !strings.Contains(err.Error(), "narrower") {
+		t.Errorf("error should advise narrowing the diff: %v", err)
+	}
+	if m.seen != 0 {
+		t.Errorf("unsplittable diff must not reach the model; got %d calls", m.seen)
 	}
 }
 
@@ -402,20 +423,49 @@ func TestAbridge_RejectsCombinedDiff(t *testing.T) {
 	}
 }
 
-func TestAbridge_RejectsNumberedDiffExpansion(t *testing.T) {
-	m := &scriptedModel{turns: []*Response{assistant()}}
-	// Many tiny lines fit under the raw byte limit but acquire a substantial
-	// line-number gutter. The actual model prompt must remain bounded too.
-	diff := "diff --git a/x b/x\n@@ -1 +1 @@\n" + strings.Repeat("+x\n", maxDiffBytes/3-100)
-	if len(diff) >= maxDiffBytes {
-		t.Fatalf("test fixture raw size = %d, want below %d", len(diff), maxDiffBytes)
+// TestAbridge_NumberedDiffExpansionTriggersChunking: many tiny lines fit
+// under the raw byte budget but acquire a substantial line-number gutter. The
+// per-run model prompt must stay bounded, so such a diff is chunked rather
+// than sent whole.
+func TestAbridge_NumberedDiffExpansionTriggersChunking(t *testing.T) {
+	restore := setSingleRunBudget(t, 400)
+	defer restore()
+	// Two file sections of 40 three-byte lines each: raw ≈ 360 bytes fits the
+	// budget, but the numbered form (3 extra bytes per line) does not.
+	var b strings.Builder
+	for _, name := range []string{"a", "b"} {
+		fmt.Fprintf(&b, "diff --git a/%s b/%s\n@@ -0,0 +1,40 @@\n", name, name)
+		for i := 0; i < 40; i++ {
+			b.WriteString("+x\n")
+		}
 	}
-	_, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
-	if err == nil || !strings.Contains(err.Error(), "numbered diff") {
-		t.Fatalf("Abridge error = %v, want numbered-diff context error", err)
+	diff := b.String()
+	if len(diff) > 400 {
+		t.Fatalf("fixture raw size = %d, want under the raw budget", len(diff))
 	}
-	if m.seen != 0 {
-		t.Fatalf("expanded prompt must not reach model; got %d calls", m.seen)
+	if fitsSingleRun(diff, 400) {
+		t.Fatal("fixture numbered form should exceed the budget")
+	}
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("s", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds rows.",
+		})),
+	}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.seen < 2 {
+		t.Errorf("model calls = %d, want one per chunk (>= 2)", m.seen)
+	}
+	for _, msgs := range m.seenMessages {
+		prompt := msgs[0].Content[0].Text
+		if len(prompt) > 400+len(userPromptIntro)+len(userPromptImports)+len(userPromptNoTools)+len(userPromptProtocol)+8 {
+			t.Errorf("per-chunk prompt is %d bytes; numbered chunk must stay within budget", len(prompt))
+		}
+	}
+	if res == nil || !strings.Contains(res.SmartDiff, "+x") {
+		t.Fatalf("merged result missing retained rows: %+v", res)
 	}
 }
 
