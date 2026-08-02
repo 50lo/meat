@@ -205,10 +205,10 @@ smaller, and a parametrized regression test checks both hook orders.
 
 About **5–9 changed rows** can go with no semantic loss:
 
-1. The removed `config_filters`, `cmdline_filters`,
-   `warnings.catch_warnings(...)`, fold marker, and `apply_warning_filters(...)`
-   prologue duplicates the retained destination copy. Collapse it to one
-   removed-side marker.
+1. The removed `config_filters` and `cmdline_filters` bindings duplicate the
+   destination bindings and sit outside the detected exact-move range. Drop
+   those two rows, but keep the paired `warnings.catch_warnings(...)` body
+   symmetric on both move endpoints.
 2. `config.addinivalue_line(...)` is shown in full on both sides merely to express
    a dedent. Keep the final form and fold the removed form.
 3. Empty added lines and `pytester.makepyfile("def test_it(): pass")` are low-value
@@ -217,10 +217,12 @@ About **5–9 changed rows** can go with no semantic loss:
 The new run fixes the earlier payload over-elision, but now hides the
 `record=False` rationale on both sides. Keeping the destination-side copy would
 explain why warnings are not recorded during configuration and why the context
-is only useful for `error` filters; the removed-side copy can stay folded.
+is only useful for `error` filters; its old copy is outside the detected move and
+can stay folded.
 
-**Suggested live target:** about **74–78/109 changed rows** (68–72%). The remaining
-gap is almost entirely cross-file move prologue and dedent-only duplication.
+**Suggested live target:** about **76–80/109 changed rows** (70–73%). The remaining
+gap is unmatched prologue, dedent-only duplication, and minor test padding; the
+exact moved body itself should stay symmetric.
 
 ## Cross-commit recommendations
 
@@ -232,8 +234,9 @@ In priority order:
    test body while folding every `accessed` assertion in the replacement test.
 3. **Coalesce adjacent same-indent ellipsis rows.** Django emits four consecutive
    fold markers inside one table after the intervening comments disappear.
-4. **Treat dedent-only and cross-file moved blocks as duplication.** pytest's
-   repeated prologue and `addinivalue_line` block are ideal safe targets.
+4. **Compress dedent-only duplicates and unmatched move framing.** For detected
+   exact moves, keep the aligned behavioral body symmetric; trim only rows
+   outside the reported pair unless both endpoints receive the same fold/elision.
 5. **Retain distinctive table stimuli, not whole harnesses.** Keep wildcard,
    tabs, delimiter boundaries, lifecycle order, and outcome; fold loop/setup
    machinery.

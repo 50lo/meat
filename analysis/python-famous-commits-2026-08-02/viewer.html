@@ -151,13 +151,13 @@ const projects = {
       "Import churn and generated-conftest imports are gone."
     ],
     boring: [
-      "The removed filter-input/catch_warnings/payload prologue duplicates the destination copy.",
+      "The two removed filter-input bindings duplicate destination bindings and sit outside the detected exact move.",
       "<code>addinivalue_line(...)</code> is duplicated in full merely to show a dedent.",
       "Eight bare changed blank lines survive.",
       "One-line pytester harness setup adds little."
     ],
-    warning: "The payload is now visible, but the non-obvious <code>record=False</code> rationale is folded on both sides. Restore the destination explanation and fund it by dropping duplicate prologue/dedent material.",
-    target: "Target: 74–78/109 changed rows."
+    warning: "The exact moved body must stay symmetric. Trim only unmatched framing, and restore the destination-side <code>record=False</code> rationale by dropping its old copy and the dedent-only duplicate.",
+    target: "Target: 76–80/109 changed rows."
   }
 };
 let current = "django";

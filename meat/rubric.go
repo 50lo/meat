@@ -8,7 +8,7 @@ import (
 // abridgeProtocolVersion covers the machine-side edit protocol as well as the
 // prose rubric. Changing the submit schema or edit semantics must invalidate
 // cached results even when the high-level advice is unchanged.
-const abridgeProtocolVersion = "source-edit-plan-v8-local-elision-move-symmetry"
+const abridgeProtocolVersion = "source-edit-plan-v9-local-elision-move-prompt"
 
 // RubricHash returns a short content hash of the complete abridging protocol.
 // Callers that cache Abridge results should mix it into their cache key.
