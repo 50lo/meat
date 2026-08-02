@@ -40,15 +40,28 @@ def metrics(text: str) -> tuple[int, int, int, int, int]:
     return changed, len(lines), len(text.encode()), files, hunks
 
 
+EXPECTED_RUBRICS = {
+    "38d6b8f832030c7da90e4138452540788cadecf2": "e6866ffaafb898ce",
+    "85fd905c4957203dcae7be146de745d5f93fbac3": "3c17e8412d288ebc",
+}
+
+
 def main() -> None:
     runs = json.loads((ROOT / "runs.json").read_text())
     assert runs["model"] == "gpt-5.6-sol"
-    assert runs["rubric_hash"] == "3c17e8412d288ebc"
+    assert runs["canonical_rubric_hash"] == "3c17e8412d288ebc"
 
     embedded_text = (ROOT / "data.js").read_text().strip()
     prefix = "window.__DEMO_FILES__ = "
     assert embedded_text.startswith(prefix) and embedded_text.endswith(";")
     embedded = json.loads(embedded_text[len(prefix) : -1])
+
+    viewer = (ROOT / "viewer.html").read_text()
+    assert '<script src="data.js"></script>' in viewer
+    assert "fetch(" not in viewer
+    assert "grid-template-columns:46px minmax(0,1fr)" in viewer
+    for key in embedded:
+        assert key in viewer
 
     for name, expected in EXPECTED.items():
         raw_path = ROOT / f"{name}.original.diff"
@@ -69,6 +82,10 @@ def main() -> None:
         assert run_data["input_sha256"] == hashlib.sha256(raw.encode()).hexdigest()
         kept = [metrics(run["response"]["smart_diff"])[0] for run in run_data["runs"]]
         assert kept == expected["runs"], (name, "runs", kept)
+        for run in run_data["runs"]:
+            assert run["model"] == "gpt-5.6-sol"
+            assert run["rubric_hash"] == EXPECTED_RUBRICS[run["meat_commit"]]
+            assert "-no-cache" in run["flags"] and "-json" in run["flags"]
         assert run_data["runs"][-1]["response"] == response
 
         assert embedded[f"{name}-original.diff"] == raw

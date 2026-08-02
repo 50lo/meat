@@ -2,11 +2,13 @@
 
 Fresh runs on **August 2, 2026** using `gpt-5.6-sol`, `-no-cache`, and
 upstream repository context. The canonical checked-in outputs were produced by
-Meat commit `85fd905c4957203dcae7be146de745d5f93fbac3`; three earlier repeat
-runs used behavior-equivalent commit
-`38d6b8f832030c7da90e4138452540788cadecf2`. Both exposed rubric hash
-`3c17e8412d288ebc`. [`runs.json`](runs.json) contains every full response,
-stderr timing/token line, input SHA-256, model, flags, and executable commit.
+Meat commit `85fd905c4957203dcae7be146de745d5f93fbac3` with rubric hash
+`3c17e8412d288ebc`. Three earlier exploratory runs used commit
+`38d6b8f832030c7da90e4138452540788cadecf2` with rubric hash
+`e6866ffaafb898ce`; because the model-visible surfaces differ, treat those as
+cross-revision robustness observations rather than identical reruns.
+[`runs.json`](runs.json) contains every full response, stderr timing/token line,
+input SHA-256, model, flags, executable commit, and per-run rubric hash.
 Run `python3 verify.py` to recount all metrics, verify JSON/diff identity, check
 repeat-run retention, and confirm the standalone viewer's embedded data.
 
@@ -53,7 +55,8 @@ text. Meat keeps one representative correction and drops seven repetitions.
 > Meat turns 16 changed lines across 8 hunks into the only 2 lines you need.
 
 **Metrics:** 16 → 2 changed rows; 76 → 10 physical rows; 2,895 → 458 bytes.
-The result was 2/16 in each of four fresh runs.
+All four recorded evaluation runs across the two Meat revisions above retained
+2/16 changed rows.
 
 Files: [`go.original.diff`](go.original.diff) ·
 [`go.meat.diff`](go.meat.diff) · [`go.meat.json`](go.meat.json)
@@ -81,7 +84,8 @@ themselves as generated. Meat removes every generated copy.
 > Meat keeps the modular source fix and removes eight generated copies.
 
 **Metrics:** 18 → 2 changed rows; 117 → 11 physical rows; 7,812 → 774
-bytes. The result was 2/18 in each of four fresh runs.
+bytes. All four recorded evaluation runs across the two Meat revisions above
+retained 2/18 changed rows.
 
 Files: [`python.original.diff`](python.original.diff) ·
 [`python.meat.diff`](python.meat.diff) ·
@@ -110,8 +114,9 @@ imports and ten repetitive hunks, leaving one concurrency decision.
 > else.
 
 **Metrics:** 22 → 2 changed rows; 106 → 13 physical rows; 5,090 → 546
-bytes. Across four fresh runs, Meat retained 2 rows three times and 4 rows once;
-the checked-in canonical result is the 2-row output.
+bytes. Across four recorded evaluation runs spanning the two Meat revisions,
+Meat retained 2 rows three times and 4 rows once; the checked-in canonical
+result is the 2-row output.
 
 Files: [`rust.original.diff`](rust.original.diff) ·
 [`rust.meat.diff`](rust.meat.diff) · [`rust.meat.json`](rust.meat.json)

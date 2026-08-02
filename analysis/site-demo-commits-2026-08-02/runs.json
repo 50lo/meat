@@ -1,13 +1,6 @@
 {
   "date": "2026-08-02",
   "model": "gpt-5.6-sol",
-  "rubric_hash": "3c17e8412d288ebc",
-  "flags": [
-    "-no-cache",
-    "-model",
-    "gpt-5.6-sol",
-    "-json"
-  ],
   "candidates": {
     "go": {
       "upstream_commit": "0b6ea6bb04e49e5eba614d39bb1334c87fff4f62",
@@ -24,7 +17,13 @@
             "input_tokens": 5866,
             "output_tokens": 337,
             "elision": "kept 2/16 changed lines in 1/1 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 2,
@@ -36,7 +35,13 @@
             "input_tokens": 5866,
             "output_tokens": 375,
             "elision": "kept 2/16 changed lines in 1/1 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 3,
@@ -48,7 +53,13 @@
             "input_tokens": 5866,
             "output_tokens": 285,
             "elision": "kept 2/16 changed lines in 1/1 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 4,
@@ -60,7 +71,15 @@
             "input_tokens": 5620,
             "output_tokens": 301,
             "elision": "kept 2/16 changed lines in 1/1 files"
-          }
+          },
+          "rubric_hash": "3c17e8412d288ebc",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-model",
+            "gpt-5.6-sol",
+            "-json"
+          ]
         }
       ]
     },
@@ -79,7 +98,13 @@
             "input_tokens": 35659,
             "output_tokens": 626,
             "elision": "kept 2/18 changed lines in 1/9 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 2,
@@ -91,7 +116,13 @@
             "input_tokens": 49086,
             "output_tokens": 917,
             "elision": "kept 2/18 changed lines in 1/9 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 3,
@@ -103,7 +134,13 @@
             "input_tokens": 61129,
             "output_tokens": 1009,
             "elision": "kept 2/18 changed lines in 1/9 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 4,
@@ -115,7 +152,15 @@
             "input_tokens": 49861,
             "output_tokens": 979,
             "elision": "kept 2/18 changed lines in 1/9 files"
-          }
+          },
+          "rubric_hash": "3c17e8412d288ebc",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-model",
+            "gpt-5.6-sol",
+            "-json"
+          ]
         }
       ]
     },
@@ -134,7 +179,13 @@
             "input_tokens": 13860,
             "output_tokens": 736,
             "elision": "kept 2/22 changed lines in 1/3 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 2,
@@ -146,7 +197,13 @@
             "input_tokens": 22754,
             "output_tokens": 1687,
             "elision": "kept 4/22 changed lines in 2/3 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 3,
@@ -158,7 +215,13 @@
             "input_tokens": 13749,
             "output_tokens": 657,
             "elision": "kept 2/22 changed lines in 1/3 files"
-          }
+          },
+          "rubric_hash": "e6866ffaafb898ce",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-json"
+          ]
         },
         {
           "run": 4,
@@ -170,9 +233,24 @@
             "input_tokens": 13098,
             "output_tokens": 412,
             "elision": "kept 2/22 changed lines in 1/3 files"
-          }
+          },
+          "rubric_hash": "3c17e8412d288ebc",
+          "model": "gpt-5.6-sol",
+          "flags": [
+            "-no-cache",
+            "-model",
+            "gpt-5.6-sol",
+            "-json"
+          ]
         }
       ]
     }
-  }
+  },
+  "canonical_rubric_hash": "3c17e8412d288ebc",
+  "canonical_flags": [
+    "-no-cache",
+    "-model",
+    "gpt-5.6-sol",
+    "-json"
+  ]
 }
