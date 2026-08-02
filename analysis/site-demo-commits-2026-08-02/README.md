@@ -1,9 +1,14 @@
 # Three landing-page demos for Meat
 
 Fresh runs on **August 2, 2026** using `gpt-5.6-sol`, `-no-cache`, and
-upstream repository context. The executable was built from Meat commit
-`85fd905c4957203dcae7be146de745d5f93fbac3`; its rubric hash was
-`3c17e8412d288ebc`.
+upstream repository context. The canonical checked-in outputs were produced by
+Meat commit `85fd905c4957203dcae7be146de745d5f93fbac3`; three earlier repeat
+runs used behavior-equivalent commit
+`38d6b8f832030c7da90e4138452540788cadecf2`. Both exposed rubric hash
+`3c17e8412d288ebc`. [`runs.json`](runs.json) contains every full response,
+stderr timing/token line, input SHA-256, model, flags, and executable commit.
+Run `python3 verify.py` to recount all metrics, verify JSON/diff identity, check
+repeat-run retention, and confirm the standalone viewer's embedded data.
 
 These are the three strongest website examples I found after mining famous Go,
 Python, and Rust projects and then testing the finalists with real Meat runs.
@@ -20,11 +25,12 @@ retain exactly two changed rows: one old line and one new line.
 |---|---|---:|---:|---:|---|
 | Go | `golang/go` `0b6ea6bb04e4` | 16 rows, 8 hunks | **2 rows, 1 hunk** | 87.5% | Eight DNS error paths make the same correction. |
 | Python | `huggingface/transformers` `cb0adddc36827` | 18 rows, 9 files | **2 rows, 1 file** | 88.9% | One modular source fix fans out into eight generated model files. |
-| Rust | `helix-editor/helix` `e7874bc69c05` | 22 rows, 11 hunks | **2 rows, 1 hunk** | 90.9% | Eleven LSP fan-outs make the same concurrency choice. |
+| Rust | `helix-editor/helix` `e7874bc69c05` | 22 rows, 11 hunks | **2 rows, 1 hunk** | 90.9% | Eight LSP fan-outs make the same concurrency choice. |
 
 The exact original diffs, canonical Meat outputs, and JSON responses are beside
 this file. `viewer.html` gives you a side-by-side version suitable for adapting
-into the website.
+into the website; `data.js` embeds the six diffs so the viewer works directly
+from `file://` as well as over HTTP.
 
 ## Go — the most instantly understandable
 
