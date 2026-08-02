@@ -616,12 +616,43 @@ func TestPromptSurfaceStaysFrozen(t *testing.T) {
 	for _, tool := range tb.tools() {
 		surfaces["tool "+tool.Name] = tool.Description + string(tool.InputSchema)
 	}
+	surfaces["nudge"] = noToolCallNudge
+	compiled, err := compileEditPlan(moveDiff, editPlan{
+		Fold: []lineFold{{StartLine: 6, EndLine: 9}, {StartLine: 16, EndLine: 19}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	surfaces["planFeedback"] = planFeedback(compiled)
 
 	for name, text := range surfaces {
 		lower := strings.ToLower(text)
 		for _, word := range banned {
 			if strings.Contains(lower, word) {
 				t.Errorf("%s leaks compiler-internal vocabulary %q", name, word)
+			}
+		}
+	}
+
+	// The freeze is not just an absence: the surfaces must still tell the
+	// model everything it acts on. Guard the load-bearing guidance so a
+	// rewording cannot silently drop it.
+	required := map[string][]string{
+		"systemPrompt": {
+			"IMPORTS ARE REMOVED AUTOMATICALLY",
+			"TREAT BEHAVIORAL MOVES SYMMETRICALLY",
+			"NEVER invent or alter program logic",
+		},
+		"userPrompt": {
+			"removed automatically",
+			"-6..9 \u2194 +16..19", // detected move pair for exactMoveDiff
+			"identical keep/remove/fold/replace treatment",
+		},
+	}
+	for name, wants := range required {
+		for _, want := range wants {
+			if !strings.Contains(surfaces[name], want) {
+				t.Errorf("%s lost required guidance %q", name, want)
 			}
 		}
 	}

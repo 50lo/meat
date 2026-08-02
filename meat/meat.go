@@ -81,6 +81,10 @@ type Result struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
+// noToolCallNudge is sent when the model produced text but no tool call. Like
+// every model-visible string, it describes only what the model must do next.
+const noToolCallNudge = "Call preview_plan or submit with a complete remove/replace/fold plan against the numbered ORIGINAL diff. Prefer removals and fixed multiline folds; use replace only for a local single-line elision. If nothing meaningful changed, remove every original line."
+
 // Abridge runs the agent loop that turns req.UnifiedDiff into a reading diff,
 // using the supplied Model for all generation.
 func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
@@ -182,7 +186,7 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 			// submitting; the loop bound prevents this from running away.
 			messages = append(messages, Message{
 				Role:    RoleUser,
-				Content: []Block{textBlock("Call preview_plan or submit with a complete remove/replace/fold plan against the numbered ORIGINAL diff. Prefer removals and fixed multiline folds; use replace only for a local single-line elision. If nothing meaningful changed, remove every original line.")},
+				Content: []Block{textBlock(noToolCallNudge)},
 			})
 			continue
 		}
