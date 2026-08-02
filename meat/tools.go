@@ -246,6 +246,15 @@ func retentionPressure(stats planStats) bool {
 	return stats.visibleChanged >= 80 || stats.visibleChanged*100 >= stats.rawChanged*45
 }
 
+// The static model-visible plan-feedback fragments, named so promptSurface can
+// hash the complete frozen surface.
+const (
+	feedbackRetention    = "Valid source-derived plan.\nRetention: %d/%d visible changed rows (%d%%); %d removed, %d hidden by %d folds"
+	feedbackMoves        = "Moves: %d exact cross-hunk/cross-file span(s) treated symmetrically (%s).\n"
+	feedbackPressureHigh = "Pressure: high retention. Reconsider repeated rename/call-site hunks after one representative anchor, default git context, mechanical prose, duplicate setup/cases, and assertion batches or suites that can become fixed ... folds. Imports are already removed mechanically. For Python, keep each suite owner, required setup, and decisive stimulus/outcome: never hide a table assignment used by a retained loop, or an entire pytester.makeini/makeconftest configuration that defines the scenario. Move folds inside those boundaries. This is advisory: preserve every distinct contract, security or compatibility caveat, condition, lifecycle edge, transformation, effect, stimulus, and outcome.\n"
+	feedbackPressureOK   = "Pressure: acceptable. Preserve uncertain behavior.\n"
+)
+
 func planFeedback(compiled compiledPlan) string {
 	stats := compiled.stats
 	percent := 0
@@ -253,7 +262,7 @@ func planFeedback(compiled compiledPlan) string {
 		percent = stats.visibleChanged * 100 / stats.rawChanged
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Valid source-derived plan.\nRetention: %d/%d visible changed rows (%d%%); %d removed, %d hidden by %d folds",
+	fmt.Fprintf(&b, feedbackRetention,
 		stats.visibleChanged, stats.rawChanged, percent,
 		stats.removedChanged, stats.foldedChanged, stats.foldCount,
 	)
@@ -262,12 +271,12 @@ func planFeedback(compiled compiledPlan) string {
 	}
 	b.WriteString(".\n")
 	if len(compiled.moves) > 0 {
-		fmt.Fprintf(&b, "Moves: %d exact cross-hunk/cross-file span(s) treated symmetrically (%s).\n", len(compiled.moves), formatMovePairs(compiled.moves, maxMoveHints))
+		fmt.Fprintf(&b, feedbackMoves, len(compiled.moves), formatMovePairs(compiled.moves, maxMoveHints))
 	}
 	if retentionPressure(stats) {
-		b.WriteString("Pressure: high retention. Reconsider repeated rename/call-site hunks after one representative anchor, default git context, mechanical prose, duplicate setup/cases, and assertion batches or suites that can become fixed ... folds. Imports are already removed mechanically. For Python, keep each suite owner, required setup, and decisive stimulus/outcome: never hide a table assignment used by a retained loop, or an entire pytester.makeini/makeconftest configuration that defines the scenario. Move folds inside those boundaries. This is advisory: preserve every distinct contract, security or compatibility caveat, condition, lifecycle edge, transformation, effect, stimulus, and outcome.\n")
+		b.WriteString(feedbackPressureHigh)
 	} else {
-		b.WriteString("Pressure: acceptable. Preserve uncertain behavior.\n")
+		b.WriteString(feedbackPressureOK)
 	}
 	b.WriteString("Preview (revised plans still use ORIGINAL line coordinates):\n")
 	b.WriteString(compiled.smartDiff)

@@ -5,6 +5,7 @@
 // triple-quote balance must survive hidden regions, and local elisions must
 // not silently change structural tokens. They are conservative, text-level
 // approximations computed per diff side; they reject plans rather than guess.
+
 package meat
 
 import (

@@ -3,6 +3,7 @@ package meat
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 )
 
 // abridgeProtocolVersion covers the machine-side edit protocol as well as the
@@ -10,10 +11,40 @@ import (
 // cached results even when the high-level advice is unchanged.
 const abridgeProtocolVersion = "source-edit-plan-v10-frozen-prompt-surface"
 
-// RubricHash returns a short content hash of the complete abridging protocol.
-// Callers that cache Abridge results should mix it into their cache key.
+// promptSurface concatenates every static model-visible string: the protocol
+// version, the system prompt, the user-prompt fragments, all tool descriptions
+// and schemas, the no-tool-call nudge, and the plan-feedback fragments. It is
+// the canonical representation hashed by RubricHash, so ANY change to what the
+// model can read invalidates caches and trips the pinned-hash test.
+func promptSurface() string {
+	var b strings.Builder
+	b.WriteString(abridgeProtocolVersion)
+	for _, s := range []string{
+		systemPrompt,
+		userPromptIntro, userPromptImports, userPromptMoves,
+		userPromptTools, userPromptNoTools, userPromptProtocol,
+		noToolCallNudge,
+		feedbackRetention, feedbackMoves, feedbackPressureHigh, feedbackPressureOK,
+	} {
+		b.WriteByte(0)
+		b.WriteString(s)
+	}
+	for _, tool := range (&toolbox{root: "."}).tools() {
+		b.WriteByte(0)
+		b.WriteString(tool.Name)
+		b.WriteByte(0)
+		b.WriteString(tool.Description)
+		b.WriteByte(0)
+		b.Write(tool.InputSchema)
+	}
+	return b.String()
+}
+
+// RubricHash returns a short content hash of the complete abridging protocol:
+// every static string the model can see plus the protocol version. Callers
+// that cache Abridge results should mix it into their cache key.
 func RubricHash() string {
-	h := sha256.Sum256([]byte(abridgeProtocolVersion + "\x00" + systemPrompt))
+	h := sha256.Sum256([]byte(promptSurface()))
 	return hex.EncodeToString(h[:8])
 }
 

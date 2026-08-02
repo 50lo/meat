@@ -5,6 +5,7 @@
 // operations in original line coordinates, and compileEditPlan validates the
 // plan (structure, elision projections, move symmetry, language rules) and
 // renders the reading diff mechanically.
+
 package meat
 
 import (

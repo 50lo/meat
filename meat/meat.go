@@ -204,19 +204,31 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	return nil, fmt.Errorf("meat: agent did not submit within %d turns", maxTurns)
 }
 
+// The static model-visible user-prompt fragments. Every string the model can
+// see that is not derived from the input diff lives in a named const so
+// promptSurface can hash the complete frozen surface.
+const (
+	userPromptIntro    = "Abridge the following unified diff into a reading diff by submitting a complete remove/replace/fold plan against the numbered original lines. Meat applies your plan to the original diff; you do not write the resulting diff yourself. Coordinates are 1-based and always refer to the original numbering. The `N|` gutter is display-only and is not part of a line's source text. Use preview_plan to inspect sizeable drafts before submit.\n"
+	userPromptImports  = "Imports/includes/requires/use declarations are removed automatically, including multiline blocks and recognized imports inside embedded source strings. They may appear in the numbered input but never in a preview or result. Do not spend edit coordinates on them, never fold across them into behavioral rows, and do not mention them in the summary.\n"
+	userPromptMoves    = "Meat detected exact source-evidenced moves across hunks/files: %s. Give both sides of each pair identical keep/remove/fold/replace treatment, including matching fold boundaries and equivalent local elisions; automatically removed rows need none. Asymmetric plans are rejected.\n"
+	userPromptTools    = "Use read_file/grep on the surrounding source only when it changes your judgment about what is load-bearing (or whether a file is generated), then preview or submit.\n"
+	userPromptNoTools  = "Judge from the diff text alone, then preview or submit.\n"
+	userPromptProtocol = "Prefer removing whole lines or ranges. Use fold to replace two or more contiguous same-polarity hunk lines with one machine-generated, indentation-preserving `...` row. Use replace only to elide part of one source line; `new` must match all of `old` with every omitted span visibly represented by `...` or `…`. Keep useful per-file and hunk structure unless the entire file or hunk is noise.\n\n```diff\n"
+)
+
 func buildUserPrompt(req Request, numbered string) string {
 	var b strings.Builder
-	b.WriteString("Abridge the following unified diff into a reading diff by submitting a complete remove/replace/fold plan against the numbered original lines. Meat applies your plan to the original diff; you do not write the resulting diff yourself. Coordinates are 1-based and always refer to the original numbering. The `N|` gutter is display-only and is not part of a line's source text. Use preview_plan to inspect sizeable drafts before submit.\n")
-	b.WriteString("Imports/includes/requires/use declarations are removed automatically, including multiline blocks and recognized imports inside embedded source strings. They may appear in the numbered input but never in a preview or result. Do not spend edit coordinates on them, never fold across them into behavioral rows, and do not mention them in the summary.\n")
+	b.WriteString(userPromptIntro)
+	b.WriteString(userPromptImports)
 	if moves := detectedMovesInDiff(req.UnifiedDiff); len(moves) > 0 {
-		fmt.Fprintf(&b, "Meat detected exact source-evidenced moves across hunks/files: %s. Give both sides of each pair identical keep/remove/fold/replace treatment, including matching fold boundaries and equivalent local elisions; automatically removed rows need none. Asymmetric plans are rejected.\n", formatMovePairs(moves, maxMoveHints))
+		fmt.Fprintf(&b, userPromptMoves, formatMovePairs(moves, maxMoveHints))
 	}
 	if req.RepoRoot != "" {
-		b.WriteString("Use read_file/grep on the surrounding source only when it changes your judgment about what is load-bearing (or whether a file is generated), then preview or submit.\n")
+		b.WriteString(userPromptTools)
 	} else {
-		b.WriteString("Judge from the diff text alone, then preview or submit.\n")
+		b.WriteString(userPromptNoTools)
 	}
-	b.WriteString("Prefer removing whole lines or ranges. Use fold to replace two or more contiguous same-polarity hunk lines with one machine-generated, indentation-preserving `...` row. Use replace only to elide part of one source line; `new` must match all of `old` with every omitted span visibly represented by `...` or `…`. Keep useful per-file and hunk structure unless the entire file or hunk is noise.\n\n```diff\n")
+	b.WriteString(userPromptProtocol)
 	b.WriteString(numbered)
 	b.WriteString("```\n")
 	return b.String()

@@ -688,12 +688,14 @@ func TestRubricHash(t *testing.T) {
 
 // TestRubricHashPinned is the approved-snapshot half of the prompt freeze:
 // TestPromptSurfaceStaysFrozen catches known-bad vocabulary, and this pin makes
-// EVERY system-prompt or protocol change a deliberate, reviewable act. If this
-// fails, re-read the frozen-surface policy on systemPrompt, confirm the change
-// tells the model only what it acts on, then update the pinned hash (and bump
-// abridgeProtocolVersion when edit semantics changed).
+// EVERY change to a static model-visible string (system prompt, user-prompt
+// fragments, tool descriptions and schemas, nudge, plan-feedback fragments) a
+// deliberate, reviewable act. If this fails, re-read the frozen-surface policy
+// on systemPrompt, confirm the change tells the model only what it acts on,
+// then update the pinned hash (and bump abridgeProtocolVersion when edit
+// semantics changed).
 func TestRubricHashPinned(t *testing.T) {
-	const pinned = "3c17e8412d288ebc"
+	const pinned = "ed338cbb899f641f"
 	if h := RubricHash(); h != pinned {
 		t.Errorf("RubricHash() = %q, pinned %q; the model-visible prompt surface changed — review it against the freeze policy on systemPrompt, then update the pin", h, pinned)
 	}

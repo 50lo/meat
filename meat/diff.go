@@ -5,6 +5,7 @@
 // downstream — the edit-plan compiler, the mandatory import pass, move
 // detection, and the Python validators — consumes this layout and never
 // re-parses the diff text.
+
 package meat
 
 import (
