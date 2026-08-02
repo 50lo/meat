@@ -120,16 +120,6 @@ type compiledPlan struct {
 	moves     []detectedMove
 }
 
-const (
-	sourceLanguageUnknown sourceLanguage = iota
-	sourceLanguageGo
-	sourceLanguagePython
-	sourceLanguageJavaScript
-	sourceLanguageRust
-	sourceLanguageC
-	sourceLanguageJava
-)
-
 // applyEditPlan validates the summary and atomically applies its source-anchored
 // plan to raw.
 func applyEditPlan(raw string, in submission) (string, error) {
@@ -460,12 +450,6 @@ func prepareFold(lines []sourceLine, layout diffLayout, in lineFold, planIndex i
 		eol:       lines[in.EndLine-1].eol,
 	}, nil
 }
-
-const (
-	pythonTripleNone pythonTripleState = iota
-	pythonTripleSingle
-	pythonTripleDouble
-)
 
 func isIdentifierStart(b byte) bool {
 	return b == '_' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'

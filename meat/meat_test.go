@@ -623,7 +623,11 @@ func TestPromptSurfaceStaysFrozen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	surfaces["planFeedback"] = planFeedback(compiled)
+	surfaces["planFeedback moves"] = planFeedback(compiled)
+	// Cover the other feedback branches: no moves, and high retention
+	// pressure (stats synthesized to trip retentionPressure).
+	surfaces["planFeedback plain"] = planFeedback(compiledPlan{stats: planStats{rawChanged: 10, visibleChanged: 4, rawFiles: 1, visibleFiles: 1}})
+	surfaces["planFeedback pressure"] = planFeedback(compiledPlan{stats: planStats{rawChanged: 100, visibleChanged: 90, rawFiles: 2, visibleFiles: 2}})
 
 	for name, text := range surfaces {
 		lower := strings.ToLower(text)
@@ -679,5 +683,18 @@ func TestRubricHash(t *testing.T) {
 	}
 	if h != RubricHash() {
 		t.Error("RubricHash is not deterministic")
+	}
+}
+
+// TestRubricHashPinned is the approved-snapshot half of the prompt freeze:
+// TestPromptSurfaceStaysFrozen catches known-bad vocabulary, and this pin makes
+// EVERY system-prompt or protocol change a deliberate, reviewable act. If this
+// fails, re-read the frozen-surface policy on systemPrompt, confirm the change
+// tells the model only what it acts on, then update the pinned hash (and bump
+// abridgeProtocolVersion when edit semantics changed).
+func TestRubricHashPinned(t *testing.T) {
+	const pinned = "3c17e8412d288ebc"
+	if h := RubricHash(); h != pinned {
+		t.Errorf("RubricHash() = %q, pinned %q; the model-visible prompt surface changed — review it against the freeze policy on systemPrompt, then update the pin", h, pinned)
 	}
 }

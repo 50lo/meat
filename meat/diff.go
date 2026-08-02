@@ -39,6 +39,16 @@ const (
 
 type sourceLanguage uint8
 
+const (
+	sourceLanguageUnknown sourceLanguage = iota
+	sourceLanguageGo
+	sourceLanguagePython
+	sourceLanguageJavaScript
+	sourceLanguageRust
+	sourceLanguageC
+	sourceLanguageJava
+)
+
 type diffLayout struct {
 	kinds       []diffLineKind
 	markerOwner []int

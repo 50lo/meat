@@ -580,6 +580,12 @@ func endsPythonBackslash(body string) bool {
 
 type pythonTripleState uint8
 
+const (
+	pythonTripleNone pythonTripleState = iota
+	pythonTripleSingle
+	pythonTripleDouble
+)
+
 func scanPythonTripleLine(text string, state *pythonTripleState) int {
 	transitions := 0
 	for i := 0; i < len(text); {
