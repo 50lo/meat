@@ -695,7 +695,7 @@ func TestRubricHash(t *testing.T) {
 // then update the pinned hash (and bump abridgeProtocolVersion when edit
 // semantics changed).
 func TestRubricHashPinned(t *testing.T) {
-	const pinned = "ed338cbb899f641f"
+	const pinned = "ea0e4f48a4afc4ef"
 	if h := RubricHash(); h != pinned {
 		t.Errorf("RubricHash() = %q, pinned %q; the model-visible prompt surface changed — review it against the freeze policy on systemPrompt, then update the pin", h, pinned)
 	}

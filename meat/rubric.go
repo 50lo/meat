@@ -11,38 +11,81 @@ import (
 // cached results even when the high-level advice is unchanged.
 const abridgeProtocolVersion = "source-edit-plan-v10-frozen-prompt-surface"
 
-// promptSurface concatenates every static model-visible string: the protocol
-// version, the system prompt, the user-prompt fragments, all tool descriptions
-// and schemas, the no-tool-call nudge, and the plan-feedback fragments. It is
-// the canonical representation hashed by RubricHash, so ANY change to what the
-// model can read invalidates caches and trips the pinned-hash test.
+// surfaceFixtureDiff is a canonical input containing an exact cross-file move,
+// used to render every branch of the model-visible prompt surface for hashing.
+// It is a fixture, never sent to a model.
+const surfaceFixtureDiff = "diff --git a/old.txt b/old.txt\n" +
+	"--- a/old.txt\n" +
+	"+++ b/old.txt\n" +
+	"@@ -1,5 +1,2 @@\n" +
+	" context\n" +
+	"-    alpha := prepare(source)\n" +
+	"-    beta := transform(alpha)\n" +
+	"-    publish(beta)\n" +
+	"-    recordSuccess(beta)\n" +
+	"+old_location_gone = true\n" +
+	"diff --git a/new.txt b/new.txt\n" +
+	"--- a/new.txt\n" +
+	"+++ b/new.txt\n" +
+	"@@ -1 +1,6 @@\n" +
+	" context\n" +
+	"+        alpha := prepare(source)\n" +
+	"+        beta := transform(alpha)\n" +
+	"+        publish(beta)\n" +
+	"+        recordSuccess(beta)\n" +
+	"+new_location_ready = true\n"
+
+// promptSurface renders every static model-visible surface over the canonical
+// fixture: the protocol version, the system prompt, the user prompt in its
+// with-tools/without-tools and move-detected branches, all tool descriptions
+// and schemas, the no-tool-call nudge, and plan feedback in its move, plain,
+// and high-pressure branches. Hashing rendered output (not a manifest of
+// fragments) means both rewording AND recomposition of anything the model can
+// read changes RubricHash, invalidating caches and tripping the pinned-hash
+// test.
 func promptSurface() string {
 	var b strings.Builder
-	b.WriteString(abridgeProtocolVersion)
-	for _, s := range []string{
-		systemPrompt,
-		userPromptIntro, userPromptImports, userPromptMoves,
-		userPromptTools, userPromptNoTools, userPromptProtocol,
-		noToolCallNudge,
-		feedbackRetention, feedbackMoves, feedbackPressureHigh, feedbackPressureOK,
-	} {
+	add := func(s string) {
 		b.WriteByte(0)
 		b.WriteString(s)
 	}
-	for _, tool := range (&toolbox{root: "."}).tools() {
-		b.WriteByte(0)
-		b.WriteString(tool.Name)
-		b.WriteByte(0)
-		b.WriteString(tool.Description)
-		b.WriteByte(0)
-		b.Write(tool.InputSchema)
+	b.WriteString(abridgeProtocolVersion)
+	add(systemPrompt)
+
+	numbered := numberedDiff(surfaceFixtureDiff)
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff, RepoRoot: "/repo"}, numbered))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff}, numbered))
+	add(noToolCallNudge)
+
+	for _, tools := range [][]Tool{
+		(&toolbox{root: "/repo"}).tools(),
+		(&toolbox{}).tools(),
+	} {
+		for _, tool := range tools {
+			add(tool.Name)
+			add(tool.Description)
+			add(string(tool.InputSchema))
+		}
 	}
+
+	// Plan feedback: moves present, plain, and high retention pressure. The
+	// fixture plan folds both sides of the detected move symmetrically.
+	moveCompiled, err := compileEditPlan(surfaceFixtureDiff, editPlan{
+		Fold: []lineFold{{StartLine: 6, EndLine: 9}, {StartLine: 16, EndLine: 19}},
+	})
+	if err != nil {
+		panic("meat: promptSurface fixture plan: " + err.Error())
+	}
+	add(planFeedback(moveCompiled))
+	add(planFeedback(compiledPlan{stats: planStats{rawChanged: 10, visibleChanged: 4, rawFiles: 1, visibleFiles: 1}}))
+	add(planFeedback(compiledPlan{stats: planStats{rawChanged: 100, visibleChanged: 90, rawFiles: 2, visibleFiles: 2}}))
 	return b.String()
 }
 
 // RubricHash returns a short content hash of the complete abridging protocol:
-// every static string the model can see plus the protocol version. Callers
-// that cache Abridge results should mix it into their cache key.
+// every static string the model can see, rendered through the real builders,
+// plus the protocol version. Callers that cache Abridge results should mix it
+// into their cache key.
 func RubricHash() string {
 	h := sha256.Sum256([]byte(promptSurface()))
 	return hex.EncodeToString(h[:8])

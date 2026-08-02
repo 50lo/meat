@@ -7,26 +7,9 @@ import (
 	"testing"
 )
 
-const exactMoveDiff = "diff --git a/old.txt b/old.txt\n" +
-	"--- a/old.txt\n" +
-	"+++ b/old.txt\n" +
-	"@@ -1,5 +1,2 @@\n" +
-	" context\n" +
-	"-    alpha := prepare(source)\n" +
-	"-    beta := transform(alpha)\n" +
-	"-    publish(beta)\n" +
-	"-    recordSuccess(beta)\n" +
-	"+old_location_gone = true\n" +
-	"diff --git a/new.txt b/new.txt\n" +
-	"--- a/new.txt\n" +
-	"+++ b/new.txt\n" +
-	"@@ -1 +1,6 @@\n" +
-	" context\n" +
-	"+        alpha := prepare(source)\n" +
-	"+        beta := transform(alpha)\n" +
-	"+        publish(beta)\n" +
-	"+        recordSuccess(beta)\n" +
-	"+new_location_ready = true\n"
+// exactMoveDiff aliases the canonical fixture so move tests and the hashed
+// prompt surface stay aligned.
+const exactMoveDiff = surfaceFixtureDiff
 
 var exactMove = detectedMove{
 	Removed: lineRange{StartLine: 6, EndLine: 9},
