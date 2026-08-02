@@ -695,8 +695,20 @@ func TestRubricHash(t *testing.T) {
 // on systemPrompt, confirm the change tells the model only what it acts on,
 // then update the pinned hash (and bump abridgeProtocolVersion when edit
 // semantics changed).
+// TestSurfaceFixturesCoverBothMoveBranches keeps the canonical hashing
+// fixtures honest: one must trigger move detection and the other must not,
+// or promptSurface silently stops rendering a user-prompt branch.
+func TestSurfaceFixturesCoverBothMoveBranches(t *testing.T) {
+	if len(detectedMovesInDiff(surfaceFixtureDiff)) == 0 {
+		t.Error("surfaceFixtureDiff no longer triggers move detection")
+	}
+	if n := len(detectedMovesInDiff(surfaceFixtureNoMoveDiff)); n != 0 {
+		t.Errorf("surfaceFixtureNoMoveDiff detects %d moves, want 0", n)
+	}
+}
+
 func TestRubricHashPinned(t *testing.T) {
-	const pinned = "54bff40b3076e80d"
+	const pinned = "7c75ef8a121a712c"
 	if h := RubricHash(); h != pinned {
 		t.Errorf("RubricHash() = %q, pinned %q; the model-visible prompt surface changed — review it against the freeze policy on systemPrompt, then update the pin", h, pinned)
 	}

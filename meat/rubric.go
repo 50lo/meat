@@ -86,17 +86,31 @@ func promptSurface() string {
 		}
 	}
 
-	// Plan feedback: moves present, plain, and high retention pressure. The
-	// fixture plan folds both sides of the detected move symmetrically.
+	// The move-hint overflow branch: more detected moves than maxMoveHints,
+	// so "and N more" is rendered and hashed.
+	overflow := make([]detectedMove, maxMoveHints+2)
+	for i := range overflow {
+		overflow[i] = detectedMove{
+			Removed: lineRange{StartLine: 10*i + 1, EndLine: 10*i + 3},
+			Added:   lineRange{StartLine: 10*i + 101, EndLine: 10*i + 103},
+		}
+	}
+	add(formatMovePairs(overflow, maxMoveHints))
+
+	// Plan feedback exactly as the model receives it: through the tool-output
+	// truncation the preview_plan/submit handlers apply. The fixture plan
+	// folds both sides of the detected move symmetrically.
 	moveCompiled, err := compileEditPlan(surfaceFixtureDiff, editPlan{
 		Fold: []lineFold{{StartLine: 6, EndLine: 9}, {StartLine: 16, EndLine: 19}},
 	})
 	if err != nil {
 		panic("meat: promptSurface fixture plan: " + err.Error())
 	}
-	add(planFeedback(moveCompiled))
-	add(planFeedback(compiledPlan{stats: planStats{rawChanged: 10, visibleChanged: 4, rawFiles: 1, visibleFiles: 1}}))
-	add(planFeedback(compiledPlan{stats: planStats{rawChanged: 100, visibleChanged: 90, rawFiles: 2, visibleFiles: 2}}))
+	add(truncateForTool(planFeedback(moveCompiled)))
+	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 10, visibleChanged: 4, rawFiles: 1, visibleFiles: 1}})))
+	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 100, visibleChanged: 90, rawFiles: 2, visibleFiles: 2}})))
+	// An oversize preview, so the truncation marker itself is on the surface.
+	add(truncateForTool(planFeedback(compiledPlan{smartDiff: strings.Repeat("+x\n", maxToolOutput)})))
 	return b.String()
 }
 
