@@ -61,14 +61,16 @@ func TestSplitDiff_RealWorldSanity(t *testing.T) {
 }
 
 // retainedChangedRows lists the changed rows of a diff that survive the
-// mandatory import pass, in order — the rows any edit plan could retain.
+// whole-diff mandatory pass (imports plus move-precedence extension), in
+// order — the rows any edit plan could retain.
 func retainedChangedRows(text string) []string {
 	lines := splitSourceLines(text)
 	layout := analyzeDiff(lines)
 	hidden := mandatoryRemovalMask(len(lines), mandatoryImportRemovalPlan(lines, layout))
+	applyMandatoryMovePrecedence(detectExactMoves(lines, layout), hidden)
 	var rows []string
 	for i, l := range lines {
-		if layout.kinds[i] == diffLineHunkChange && !hidden[i] {
+		if layout.kinds[i] == diffLineHunkChange && !hidden[i] && !isFixedFoldLine(l.text) {
 			rows = append(rows, l.text)
 		}
 	}

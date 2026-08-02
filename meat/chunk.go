@@ -104,10 +104,24 @@ type chunkBuilder struct {
 	// line endings, so any span's single-run size is O(1) to check.
 	prefixText []int
 	prefixRaw  []int
-	// hidden marks lines the mandatory import pass removes. splitHunk drops
-	// them from segment bodies: a segment's own compiler could not classify a
-	// severed block, and dropped rows could never appear in a result anyway.
+	// hidden marks lines the whole-diff mandatory pass removes: the import
+	// pass plus move-precedence extension (an exact move pairing an import
+	// row hides both sides). splitHunk drops them from segment bodies: a
+	// segment's own compiler could not classify a severed block or see a
+	// cross-chunk move counterpart, and dropped rows could never appear in a
+	// result anyway.
 	hidden []bool
+	// extraHidden marks the subset of hidden that a chunk-local compiler
+	// would NOT re-derive (rows hidden only through a move whose counterpart
+	// may land in another chunk). Sections and hunks containing such rows are
+	// never copied verbatim; they go through row-dropping segmentation.
+	extraHidden []bool
+	// foldAt/folds carry the whole-diff mandatory Python suite placeholders:
+	// a hidden import row whose removal would leave a visible suite owner
+	// with no body is emitted as its fixed `...` placeholder row rather than
+	// dropped, matching whole-diff rendering.
+	foldAt []int
+	folds  []plannedFold
 	// inString marks lines whose lexical position (on either diff side) is
 	// inside a multiline string literal — a Go/JS backtick string or a
 	// Python/Java triple-quoted string. Mid-hunk cuts never land on such a
@@ -133,9 +147,27 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 		budget:     budget,
 		prefixText: make([]int, len(lines)+1),
 		prefixRaw:  make([]int, len(lines)+1),
-		hidden:     mandatoryRemovalMask(len(lines), mandatoryImportRemovalPlan(lines, layout)),
 		inString:   stringInteriorMask(lines, layout),
 	}
+	// The whole-diff mandatory mask: the import pass plus move-precedence
+	// extension. extraHidden isolates rows a chunk-local compiler could not
+	// re-derive (hidden only through a move whose counterpart may land in
+	// another chunk); sections containing them are never copied verbatim.
+	importMask := mandatoryRemovalMask(len(lines), mandatoryImportRemovalPlan(lines, layout))
+	b.hidden = append([]bool(nil), importMask...)
+	applyMandatoryMovePrecedence(detectExactMoves(lines, layout), b.hidden)
+	b.extraHidden = make([]bool, len(lines))
+	for i := range b.hidden {
+		b.extraHidden[i] = b.hidden[i] && !importMask[i]
+	}
+	// The whole-diff mandatory Python suite placeholders, so a dropped import
+	// row that props up a visible suite owner is emitted as its fixed `...`
+	// row exactly as whole-diff rendering would.
+	placeholderState := newPlanState(len(lines))
+	copy(placeholderState.hidden, b.hidden)
+	addMandatoryPythonSuitePlaceholders(lines, layout, &placeholderState, b.hidden)
+	b.foldAt = placeholderState.foldAt
+	b.folds = placeholderState.folds
 	for i, l := range lines {
 		b.prefixText[i+1] = b.prefixText[i] + len(l.text)
 		b.prefixRaw[i+1] = b.prefixRaw[i] + len(l.text) + len(l.eol)
@@ -158,6 +190,18 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 		return nil
 	}
 	for id, s := range sections {
+		if b.spanHasExtraHidden(s) {
+			// Rows only a whole-diff pass hides (cross-file move counterparts)
+			// must be dropped from the chunk text; splitSection's segmenting
+			// path owns that, so such a section is never packed verbatim.
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			if err := b.splitSection(id, s); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if open >= 0 && b.spanFits(open, s.end) {
 			openEnd = s.end
 			continue
@@ -388,6 +432,17 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 		return nil
 	}
 	for _, h := range hunks {
+		if b.spanHasExtraHidden(h) {
+			// Rows hidden only by whole-diff move analysis must be dropped
+			// from the emitted text; the segmenting path owns that.
+			if err := flush(); err != nil {
+				return err
+			}
+			if err := b.splitHunk(h, prefixSizes, emit); err != nil {
+				return err
+			}
+			continue
+		}
 		if open >= 0 && runFits(open, h.end) {
 			openEnd = h.end
 			continue
@@ -484,7 +539,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		var segOldStart, segNewStart int
 		segVisOld, segVisNew := 0, 0
 		segTextLen, segRawLen, segCount := 0, 0, 0
-		var spans []lineSpan
+		var body strings.Builder
 		hasChange := false
 		for i < bodyEnd {
 			next := unitEnd(i)
@@ -517,13 +572,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 			oldOff += u.visOld + u.dropOld
 			newOff += u.visNew + u.dropNew
 			hasChange = hasChange || u.hasChange
-			for _, sp := range u.spans {
-				if n := len(spans); n > 0 && spans[n-1].end == sp.start {
-					spans[n-1].end = sp.end
-				} else {
-					spans = append(spans, sp)
-				}
-			}
+			b.appendUnit(&body, i, next)
 			atBodyStart = false
 			i = next
 		}
@@ -540,9 +589,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		var sb strings.Builder
 		sb.WriteString(synthHunkHeader(segOldStart, segVisOld, oldZero, segNewStart, segVisNew, newZero, segHeading))
 		sb.WriteString(headerEOL)
-		for _, sp := range spans {
-			sb.WriteString(b.rangeText(sp.start, sp.end))
-		}
+		sb.WriteString(body.String())
 		if err := emit(sb.String()); err != nil {
 			return err
 		}
@@ -551,13 +598,14 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 }
 
 // unitInfo aggregates one atomic unit for splitHunk: sizes and per-side row
-// counts of its visible lines, per-side counts of its import-dropped lines,
-// the visible sub-spans to copy, and whether any visible row is a change.
+// counts of its emitted lines, per-side counts of its dropped lines, and
+// whether any emitted row is a change. A hidden row carrying a mandatory
+// Python suite placeholder is emitted as that fixed placeholder row (exactly
+// as whole-diff rendering emits it) rather than dropped.
 type unitInfo struct {
 	textLen, rawLen, count int
 	visOld, visNew         int
 	dropOld, dropNew       int
-	spans                  []lineSpan
 	hasChange              bool
 }
 
@@ -576,6 +624,17 @@ func (b *chunkBuilder) unitStats(start, end int) unitInfo {
 			}
 		}
 		if b.hidden[i] {
+			if text, eol, ok := b.placeholderRow(i); ok {
+				u.visOld += uo
+				u.visNew += un
+				u.textLen += len(text)
+				u.rawLen += len(text) + len(eol)
+				u.count++
+				if b.layout.kinds[i] == diffLineHunkChange {
+					u.hasChange = true
+				}
+				continue
+			}
 			u.dropOld += uo
 			u.dropNew += un
 			continue
@@ -588,13 +647,48 @@ func (b *chunkBuilder) unitStats(start, end int) unitInfo {
 		if b.layout.kinds[i] == diffLineHunkChange {
 			u.hasChange = true
 		}
-		if n := len(u.spans); n > 0 && u.spans[n-1].end == i {
-			u.spans[n-1].end = i + 1
-		} else {
-			u.spans = append(u.spans, lineSpan{start: i, end: i + 1})
-		}
 	}
 	return u
+}
+
+// appendUnit writes the emitted text of one atomic unit: visible lines
+// verbatim, hidden lines dropped, placeholder-carrying hidden lines as their
+// fixed `...` row.
+func (b *chunkBuilder) appendUnit(sb *strings.Builder, start, end int) {
+	for i := start; i < end; i++ {
+		if b.hidden[i] {
+			if text, eol, ok := b.placeholderRow(i); ok {
+				sb.WriteString(text)
+				sb.WriteString(eol)
+			}
+			continue
+		}
+		sb.WriteString(b.lines[i].text)
+		sb.WriteString(b.lines[i].eol)
+	}
+}
+
+// placeholderRow returns the fixed mandatory-placeholder row for hidden line
+// i, when the whole-diff compiler would emit one there.
+func (b *chunkBuilder) placeholderRow(i int) (text, eol string, ok bool) {
+	fi := b.foldAt[i]
+	if fi < 0 {
+		return "", "", false
+	}
+	f := b.folds[fi]
+	return string(f.marker) + f.indent + "...", f.eol, true
+}
+
+// spanHasExtraHidden reports whether the span contains rows hidden only by
+// whole-diff analysis (move-precedence extension), which a chunk-local
+// compiler could not re-derive.
+func (b *chunkBuilder) spanHasExtraHidden(s lineSpan) bool {
+	for i := s.start; i < s.end; i++ {
+		if b.extraHidden[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // synthHunkHeader renders a segment's @@ header from its side starts and

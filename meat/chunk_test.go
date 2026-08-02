@@ -1060,6 +1060,114 @@ func TestAbridge_ChunkedTrailerBecomesOwnPieceWhenLastIsFull(t *testing.T) {
 	}
 }
 
+// TestAbridge_ChunkedKeepsPythonSuitePlaceholder: when the mandatory import
+// pass empties a visible Python suite owner's body, whole-diff rendering
+// emits a fixed `...` placeholder. Splitting must not lose it: a chunk-local
+// compiler that never sees the import row cannot know the owner needs one.
+func TestAbridge_ChunkedKeepsPythonSuitePlaceholder(t *testing.T) {
+	meta := "diff --git a/mod.py b/mod.py\n--- a/mod.py\n+++ b/mod.py\n"
+	const pad = 8
+	var b strings.Builder
+	b.WriteString(meta)
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", pad+4)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&b, "+x%d = %d\n", i, i)
+	}
+	b.WriteString("+def optional_feature():\n+    import optional_dep\n+def useful():\n+    return 1\n")
+	diff := b.String()
+
+	whole, err := compileEditPlan(diff, editPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(whole.smartDiff, "+    ...") {
+		t.Fatalf("whole-diff reference lost its suite placeholder:\n%s", whole.smartDiff)
+	}
+
+	// Cut right at the import row, so the owner and its dropped body row
+	// land in the same segment but the segment's own compiler never sees a
+	// reason to emit a placeholder.
+	for _, mark := range []string{"+def optional_feature():\n", "+    import optional_dep\n"} {
+		prefix := strings.SplitAfter(diff, mark)[0]
+		budget := len(numberedDiff(prefix))
+		restore := setSingleRunBudget(t, budget)
+		m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds module.",
+		}))}}
+		res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+		restore()
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		if !strings.Contains(res.SmartDiff, "+    ...") {
+			t.Errorf("budget at %q: chunked result lost the mandatory suite placeholder:\n%s", mark, res.SmartDiff)
+		}
+		if strings.Contains(res.SmartDiff, "import optional_dep") {
+			t.Errorf("budget at %q: import leaked:\n%s", mark, res.SmartDiff)
+		}
+	}
+}
+
+// TestAbridge_ChunkedCrossFileImportMoveStaysHidden: an exact move pairing an
+// import block in one file with the same block in another (e.g. relocated
+// into a fixture file) is hidden on BOTH sides by whole-diff compilation via
+// move precedence. When the two files land in different chunks, no
+// chunk-local pass can see the pairing; the splitter must pre-drop both
+// sides so imports never appear.
+func TestAbridge_ChunkedCrossFileImportMoveStaysHidden(t *testing.T) {
+	imports := "import (\n\t\"alpha/betapackage/deep\"\n\t\"gamma/deltapackage/deeper\"\n\t\"epsilon/zetapackage/deepest\"\n\t\"eta/thetapackage/bottom\"\n)\n"
+	impLines := splitSourceLines(imports)
+	var b strings.Builder
+	b.WriteString("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n")
+	fmt.Fprintf(&b, "@@ -1,%d +1,1 @@\n context a\n", 1+len(impLines))
+	for _, l := range impLines {
+		b.WriteString("-" + l.text + "\n")
+	}
+	b.WriteString("diff --git a/fixture.txt b/fixture.txt\n--- a/fixture.txt\n+++ b/fixture.txt\n")
+	fmt.Fprintf(&b, "@@ -1,1 +1,%d @@\n context f\n", 1+len(impLines)+1)
+	for _, l := range impLines {
+		b.WriteString("+" + l.text + "\n")
+	}
+	b.WriteString("+fixture tail\n")
+	diff := b.String()
+
+	// Whole-diff compilation hides both sides (import pass on a.go, move
+	// precedence extending to fixture.txt).
+	whole, err := compileEditPlan(diff, editPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detectExactMoves(splitSourceLines(diff), analyzeDiff(splitSourceLines(diff)))) == 0 {
+		t.Fatal("fixture no longer triggers move detection")
+	}
+	if strings.Contains(whole.smartDiff, "alpha/betapackage") {
+		t.Fatalf("whole-diff reference kept the moved import block:\n%s", whole.smartDiff)
+	}
+
+	// Budget forces the two file sections into separate chunks.
+	second := strings.Index(diff, "diff --git a/fixture.txt")
+	budget := len(numberedDiff(diff[:second]))
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Moves imports into fixture.",
+	}))}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"alpha/betapackage", "gamma/deltapackage", "import ("} {
+		if strings.Contains(res.SmartDiff, unwanted) {
+			t.Errorf("moved import %q leaked into chunked result:\n%s", unwanted, res.SmartDiff)
+		}
+	}
+	if !strings.Contains(res.SmartDiff, "+fixture tail") {
+		t.Errorf("behavioral fixture row lost:\n%s", res.SmartDiff)
+	}
+}
+
 func TestFitsSingleRun(t *testing.T) {
 	diff := "diff --git a/a b/a\n@@ -1 +1 @@\n+x\n"
 	if !fitsSingleRun(diff, len(numberedDiff(diff))) {
