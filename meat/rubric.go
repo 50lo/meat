@@ -3,6 +3,7 @@ package meat
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 )
 
@@ -86,31 +87,77 @@ func promptSurface() string {
 		}
 	}
 
-	// The move-hint overflow branch: more detected moves than maxMoveHints,
-	// so "and N more" is rendered and hashed.
-	overflow := make([]detectedMove, maxMoveHints+2)
-	for i := range overflow {
-		overflow[i] = detectedMove{
-			Removed: lineRange{StartLine: 10*i + 1, EndLine: 10*i + 3},
-			Added:   lineRange{StartLine: 10*i + 101, EndLine: 10*i + 103},
-		}
-	}
-	add(formatMovePairs(overflow, maxMoveHints))
+	// The move-hint overflow branch, rendered through the real prompt
+	// builder: a fixture with more detected moves than maxMoveHints, so
+	// "and N more" appears in an actual user prompt.
+	overflowDiff := surfaceOverflowDiff()
+	add(buildUserPrompt(Request{UnifiedDiff: overflowDiff}, numberedDiff(overflowDiff)))
 
-	// Plan feedback exactly as the model receives it: through the tool-output
-	// truncation the preview_plan/submit handlers apply. The fixture plan
-	// folds both sides of the detected move symmetrically.
-	moveCompiled, err := compileEditPlan(surfaceFixtureDiff, editPlan{
-		Fold: []lineFold{{StartLine: 6, EndLine: 9}, {StartLine: 16, EndLine: 19}},
-	})
-	if err != nil {
-		panic("meat: promptSurface fixture plan: " + err.Error())
+	// Plan feedback exactly as the model receives it: rendered by the real
+	// preview_plan tool handler, which applies tool-output truncation. The
+	// fixture plan folds both sides of the detected move symmetrically.
+	fixtureTB := &toolbox{rawDiff: surfaceFixtureDiff}
+	moveFeedback, isErr := fixtureTB.previewPlan([]byte(`{"remove":[],"replace":[],"fold":[{"start_line":6,"end_line":9},{"start_line":16,"end_line":19}]}`))
+	if isErr {
+		panic("meat: promptSurface fixture plan: " + moveFeedback)
 	}
-	add(truncateForTool(planFeedback(moveCompiled)))
+	add(moveFeedback)
+	// The remaining feedback branches: plain and high retention pressure.
 	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 10, visibleChanged: 4, rawFiles: 1, visibleFiles: 1}})))
 	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 100, visibleChanged: 90, rawFiles: 2, visibleFiles: 2}})))
-	// An oversize preview, so the truncation marker itself is on the surface.
-	add(truncateForTool(planFeedback(compiledPlan{smartDiff: strings.Repeat("+x\n", maxToolOutput)})))
+	// An oversize preview through the real handler, so the handler-applied
+	// truncation and its marker are on the surface.
+	oversizeTB := &toolbox{rawDiff: surfaceOversizeDiff()}
+	oversizeFeedback, isErr := oversizeTB.previewPlan([]byte(`{"remove":[],"replace":[],"fold":[]}`))
+	if isErr {
+		panic("meat: promptSurface oversize preview: " + oversizeFeedback)
+	}
+	add(oversizeFeedback)
+	return b.String()
+}
+
+// surfaceOverflowDiff builds a valid diff containing more exact moves than
+// maxMoveHints, so the move-hint overflow branch renders in a real prompt.
+func surfaceOverflowDiff() string {
+	blocks := maxMoveHints + 2
+	var removed, added strings.Builder
+	for i := 0; i < blocks; i++ {
+		fmt.Fprintf(&removed, "-    alpha%d := prepare%d(source%d)\n", i, i, i)
+		fmt.Fprintf(&removed, "-    beta%d := transform%d(alpha%d)\n", i, i, i)
+		fmt.Fprintf(&removed, "-    publishResult%d(beta%d, alpha%d)\n", i, i, i)
+		fmt.Fprintf(&added, "+    alpha%d := prepare%d(source%d)\n", i, i, i)
+		fmt.Fprintf(&added, "+    beta%d := transform%d(alpha%d)\n", i, i, i)
+		fmt.Fprintf(&added, "+    publishResult%d(beta%d, alpha%d)\n", i, i, i)
+		if i < blocks-1 {
+			// Context separators split the runs so each block is its
+			// own detected move.
+			fmt.Fprintf(&removed, " separator%d\n", i)
+			fmt.Fprintf(&added, " separator%d\n", i)
+		}
+	}
+	seps := blocks - 1
+	var b strings.Builder
+	b.WriteString("diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ b/old.txt\n")
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", 1+3*blocks+seps, 1+seps)
+	b.WriteString(" context\n")
+	b.WriteString(removed.String())
+	b.WriteString("diff --git a/new.txt b/new.txt\n--- a/new.txt\n+++ b/new.txt\n")
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", 1+seps, 1+3*blocks+seps)
+	b.WriteString(" context\n")
+	b.WriteString(added.String())
+	return b.String()
+}
+
+// surfaceOversizeDiff builds a valid diff whose identity preview exceeds
+// maxToolOutput, forcing the preview_plan handler to truncate.
+func surfaceOversizeDiff() string {
+	rows := maxToolOutput / 8
+	var b strings.Builder
+	b.WriteString("diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n")
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", rows)
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&b, "+row %d\n", i)
+	}
 	return b.String()
 }
 

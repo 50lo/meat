@@ -705,10 +705,13 @@ func TestSurfaceFixturesCoverBothMoveBranches(t *testing.T) {
 	if n := len(detectedMovesInDiff(surfaceFixtureNoMoveDiff)); n != 0 {
 		t.Errorf("surfaceFixtureNoMoveDiff detects %d moves, want 0", n)
 	}
+	if n := len(detectedMovesInDiff(surfaceOverflowDiff())); n <= maxMoveHints {
+		t.Errorf("surfaceOverflowDiff detects %d moves, want more than maxMoveHints (%d) so the overflow hint renders", n, maxMoveHints)
+	}
 }
 
 func TestRubricHashPinned(t *testing.T) {
-	const pinned = "7c75ef8a121a712c"
+	const pinned = "f198a0194b441600"
 	if h := RubricHash(); h != pinned {
 		t.Errorf("RubricHash() = %q, pinned %q; the model-visible prompt surface changed — review it against the freeze policy on systemPrompt, then update the pin", h, pinned)
 	}
