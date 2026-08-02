@@ -59,6 +59,11 @@ type diffChunk struct {
 	// duplicates metadata already carried by the previous piece, and the merge
 	// step drops the duplicate once the file has surfaced in the output.
 	continuation bool
+	// passthrough marks a chunk with no hunk content (a format-patch trailer
+	// or preamble stranded by an import-only section). It is copied verbatim
+	// into the merged reading diff without an agent run; whole-diff
+	// compilation retains such envelope lines too.
+	passthrough bool
 }
 
 // numberedLen is the exact size of numberedDiff output for count lines whose
@@ -143,18 +148,23 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 
 	open := -1 // start line of the accumulating whole-section chunk
 	openEnd := 0
-	flush := func() {
+	flush := func() error {
 		if open >= 0 {
-			b.chunks = append(b.chunks, diffChunk{text: b.rangeText(open, openEnd), sectionID: -1})
+			if err := b.add(diffChunk{text: b.rangeText(open, openEnd), sectionID: -1}); err != nil {
+				return err
+			}
 			open = -1
 		}
+		return nil
 	}
 	for id, s := range sections {
 		if open >= 0 && b.spanFits(open, s.end) {
 			openEnd = s.end
 			continue
 		}
-		flush()
+		if err := flush(); err != nil {
+			return nil, err
+		}
 		if b.spanFits(s.start, s.end) {
 			open, openEnd = s.start, s.end
 			continue
@@ -163,41 +173,79 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 			return nil, err
 		}
 	}
-	flush()
-	if len(b.chunks) > maxChunks {
-		return nil, fmt.Errorf("diff splits into %d chunks (limit %d) — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(b.chunks), maxChunks)
+	if err := flush(); err != nil {
+		return nil, err
 	}
 	return b.chunks, nil
 }
 
-// stringInteriorMask marks lines whose lexical position on either diff side
-// begins inside a multiline string literal, using the same per-hunk, per-side
-// scan as the mandatory import pass so the splitter and the chunk-local
-// compiler agree about what is embedded source.
+// add appends a chunk, refusing pathological amplification (e.g. an enormous
+// replicated metadata block leaving almost no body budget per piece) before
+// the full expansion is allocated.
+func (b *chunkBuilder) add(c diffChunk) error {
+	if len(b.chunks) >= maxChunks {
+		return fmt.Errorf("diff splits into more than %d chunks — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", maxChunks)
+	}
+	b.chunks = append(b.chunks, c)
+	return nil
+}
+
+// stringInteriorMask marks hunk-body lines that begin while EITHER diff
+// side's lexical position is inside a multiline string literal — a Go/JS
+// backtick string or a Python/Java triple-quoted string. Both side scanners
+// advance in physical line order (a context row feeds both), so an
+// interleaved +/- row between one side's opener and interior is marked too.
+// The per-side transitions match embeddedSourceLines, which the chunk-local
+// import pass uses, so the splitter and each chunk's compiler agree about
+// what is embedded source.
 func stringInteriorMask(lines []sourceLine, layout diffLayout) []bool {
 	mask := make([]bool, len(lines))
-	for hunk, kind := range layout.kinds {
-		if kind != diffLineHunkHeader {
+	var old, new stringScanState
+	language := sourceLanguageUnknown
+	for i, kind := range layout.kinds {
+		if kind == diffLineHunkHeader {
+			language = layout.language[i]
+			old, new = stringScanState{}, stringScanState{}
 			continue
 		}
-		end := nextLayoutLine(layout, hunk+1, func(k diffLineKind) bool {
-			return k == diffLineHeader || k == diffLineOldFile || k == diffLineHunkHeader || k == diffLineMailSignature
-		})
-		language := layout.language[hunk]
-		if language == sourceLanguageUnknown {
+		if language == sourceLanguageUnknown || !isHunkSource(kind) || len(lines[i].text) == 0 {
 			continue
 		}
-		for _, side := range []byte{'-', '+'} {
-			sideLines := importLinesForSide(lines, layout, hunk+1, end, side)
-			flags := embeddedSourceLines(sideLines, language)
-			for k, sl := range sideLines {
-				if flags[k] {
-					mask[sl.index] = true
-				}
-			}
+		mask[i] = old.inString() || new.inString()
+		body := lines[i].text[1:]
+		switch lines[i].text[0] {
+		case '-':
+			old.scan(body, language)
+		case '+':
+			new.scan(body, language)
+		case ' ':
+			old.scan(body, language)
+			new.scan(body, language)
 		}
 	}
 	return mask
+}
+
+// stringScanState tracks one diff side's multiline-string position with the
+// same transitions as embeddedSourceLines.
+type stringScanState struct {
+	triple   pythonTripleState
+	backtick bool
+}
+
+func (s *stringScanState) inString() bool {
+	return s.triple != pythonTripleNone || s.backtick
+}
+
+func (s *stringScanState) scan(text string, language sourceLanguage) {
+	if language == sourceLanguagePython || language == sourceLanguageJava {
+		scanPythonTripleLine(text, &s.triple)
+	}
+	if language == sourceLanguageGo || language == sourceLanguageJavaScript {
+		if countCodeBackticks(text)%2 == 1 {
+			s.backtick = !s.backtick
+		}
+	}
 }
 
 // sections partitions the diff into per-file spans. Any preamble before the
@@ -294,18 +342,21 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 	}
 
 	piece := 0
-	emit := func(body string) {
+	emit := func(body string) error {
 		prefix := metaText
 		if piece == 0 {
 			prefix = preambleText + metaText
 		}
-		b.chunks = append(b.chunks, diffChunk{
+		if err := b.add(diffChunk{
 			text:         prefix + body,
 			metaPrefix:   metaText,
 			sectionID:    sectionID,
 			continuation: piece > 0,
-		})
+		}); err != nil {
+			return err
+		}
 		piece++
+		return nil
 	}
 	// prefixSizes is the byte/line cost every piece pays before its body: the
 	// replicated metadata, plus the preamble on the first piece.
@@ -327,18 +378,23 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 
 	open := -1 // start line of the accumulating hunk run
 	openEnd := 0
-	flush := func() {
+	flush := func() error {
 		if open >= 0 {
-			emit(b.rangeText(open, openEnd))
+			if err := emit(b.rangeText(open, openEnd)); err != nil {
+				return err
+			}
 			open = -1
 		}
+		return nil
 	}
 	for _, h := range hunks {
 		if open >= 0 && runFits(open, h.end) {
 			openEnd = h.end
 			continue
 		}
-		flush()
+		if err := flush(); err != nil {
+			return err
+		}
 		if runFits(h.start, h.end) {
 			open, openEnd = h.start, h.end
 			continue
@@ -347,17 +403,35 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 			return err
 		}
 	}
-	flush()
+	if err := flush(); err != nil {
+		return err
+	}
 
-	if tailStart < s.end && piece > 0 {
-		// Re-attach the tail to the section's final piece, re-checking the
-		// piece still fits the single-run budget with it.
+	// Preserve the section envelope. The tail (a format-patch mail signature,
+	// version trailer, or trailing prose) attaches to the section's final
+	// piece when it fits, or becomes its own prose piece; if no piece was
+	// emitted (an import-only section whose body the compiler drops), any
+	// preamble and tail still survive as prose — whole-diff compilation
+	// retains them too.
+	tailText := b.rangeText(tailStart, s.end)
+	if tailText != "" && piece > 0 {
 		last := &b.chunks[len(b.chunks)-1]
-		candidate := last.text + b.rangeText(tailStart, s.end)
-		if !fitsSingleRun(candidate, b.budget) {
+		if candidate := last.text + tailText; fitsSingleRun(candidate, b.budget) {
+			last.text = candidate
+			tailText = ""
+		}
+	}
+	prose := tailText
+	if piece == 0 {
+		prose = preambleText + tailText
+	}
+	if prose != "" {
+		if !fitsSingleRun(prose, b.budget) {
 			return fmt.Errorf("cannot fit the diff trailer at line %d into a chunk under the size limit — try a narrower diff (per-file with `git diff -- <path> | meat`)", tailStart+1)
 		}
-		last.text = candidate
+		if err := b.add(diffChunk{text: prose, sectionID: -1, passthrough: true}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -384,7 +458,7 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 // opener would describe context the segment does not start inside. Segments
 // left with no changed rows (context-only, or import-only after the drop)
 // are not emitted; no plan could retain a change-free hunk either.
-func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string)) error {
+func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string) error) error {
 	oldStart, oldZero, newStart, newZero, heading := parseHunkHeaderForSplit(b.lines[h.start].text)
 	headerEOL := b.lines[h.start].eol
 	if headerEOL == "" {
@@ -469,7 +543,9 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		for _, sp := range spans {
 			sb.WriteString(b.rangeText(sp.start, sp.end))
 		}
-		emit(sb.String())
+		if err := emit(sb.String()); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -612,24 +688,44 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 	if err != nil {
 		return nil, fmt.Errorf("meat: %w", err)
 	}
-	if len(chunks) == 0 {
-		// Every row was import scaffolding or change-free context — nothing
-		// any edit plan could retain. Report that without a model call.
-		return &Result{Summary: "Only imports and unchanged context; nothing to read."}, nil
+	modelChunks := 0
+	for _, c := range chunks {
+		if !c.passthrough {
+			modelChunks++
+		}
 	}
 	progress := req.Progress
 	if progress == nil {
 		progress = func(string) {}
 	}
-	progress(fmt.Sprintf("large diff: abridging %d chunks", len(chunks)))
+	if modelChunks > 0 {
+		progress(fmt.Sprintf("large diff: abridging %d chunks", modelChunks))
+	}
 
 	merged := &Result{}
 	var parts []string
 	var summaries []string
+	appendPiece := func(piece string) {
+		// Pieces join on line boundaries, but the final piece may keep a
+		// missing final newline from the original.
+		if len(parts) > 0 && !strings.HasSuffix(parts[len(parts)-1], "\n") {
+			parts[len(parts)-1] += "\n"
+		}
+		parts = append(parts, piece)
+	}
 	seenSummary := make(map[string]bool)
 	emittedMeta := make(map[int]bool)
-	for i, chunk := range chunks {
-		label := fmt.Sprintf("chunk %d/%d", i+1, len(chunks))
+	run := 0
+	for _, chunk := range chunks {
+		if chunk.passthrough {
+			// Envelope text with no hunk content (format-patch trailer, or a
+			// preamble stranded by an import-only section): copied verbatim,
+			// no agent run.
+			appendPiece(chunk.text)
+			continue
+		}
+		run++
+		label := fmt.Sprintf("chunk %d/%d", run, modelChunks)
 		sub := req
 		sub.UnifiedDiff = chunk.text
 		sub.Progress = func(msg string) { progress(label + ": " + msg) }
@@ -654,18 +750,19 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 				}
 			}
 			if piece != "" {
-				// Pieces join on line boundaries, but the last piece may keep
-				// a missing final newline from the original.
-				if len(parts) > 0 && !strings.HasSuffix(parts[len(parts)-1], "\n") {
-					parts[len(parts)-1] += "\n"
-				}
-				parts = append(parts, piece)
+				appendPiece(piece)
 			}
 		}
 		if s := strings.TrimSpace(res.Summary); s != "" && !seenSummary[s] {
 			seenSummary[s] = true
 			summaries = append(summaries, s)
 		}
+	}
+	if modelChunks == 0 {
+		// Every changed row was import scaffolding — nothing any edit plan
+		// could retain. Say so; passthrough envelope text is dropped along
+		// with the change it framed.
+		return &Result{Summary: "Only imports and unchanged context; nothing to read."}, nil
 	}
 	merged.SmartDiff = strings.Join(parts, "")
 	merged.Summary = strings.Join(summaries, " ")

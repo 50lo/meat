@@ -945,6 +945,121 @@ func TestAbridge_ChunkedImportOnlyOversizeDiff(t *testing.T) {
 	}
 }
 
+// TestSplitDiff_InterleavedSideStringInteriorAtomic: string interiors are
+// tracked per diff side but in physical line order, so an interleaved row of
+// the OTHER side between one side's opener and closer is also uncuttable — a
+// segment starting there would desynchronize that side's lexical state.
+func TestSplitDiff_InterleavedSideStringInteriorAtomic(t *testing.T) {
+	meta := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n"
+	const pad = 8
+	var b strings.Builder
+	b.WriteString(meta)
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", pad+5, pad+3)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&b, " shared row %d\n", i)
+	}
+	// The old side's backtick string spans rows interleaved with new-side
+	// rows; behavioral old-side rows follow the closer. A segment starting on
+	// an interleaved + row would desynchronize the - side: the chunk-local
+	// scan reads `end` + backtick as an OPENER and misclassifies the
+	// following require() row as embedded source, hiding it.
+	b.WriteString("-var s = `text\n+var t = 1\n-import \"embedded\"\n+var u = 2\n-end`\n-var outside = require(\"out\")\n-var last = 9\n+var v = 3\n")
+	diff := b.String()
+
+	whole, err := compileEditPlan(diff, editPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantChanged := changedRowsOf(whole.smartDiff)
+
+	// Force cuts at each interleaved row; the merged identity result must
+	// keep exactly the changed rows whole-diff compilation keeps. (Chunking
+	// may drop change-free context segments; context is not load-bearing.)
+	for _, mark := range []string{"+var t = 1\n", "-import \"embedded\"\n", "+var u = 2\n", "-end`\n"} {
+		prefix := strings.SplitAfter(diff, mark)[0]
+		budget := len(numberedDiff(prefix))
+		chunks, err := splitDiffForAbridging(diff, budget)
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		requireValidChunks(t, chunks, budget)
+
+		restore := setSingleRunBudget(t, budget)
+		m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Changes vars.",
+		}))}}
+		res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+		restore()
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		if got := changedRowsOf(res.SmartDiff); !slicesEqual(got, wantChanged) {
+			t.Errorf("budget at %q: chunked changed rows diverge from whole-diff compilation:\nchunked: %q\nwhole:   %q", mark, got, wantChanged)
+		}
+	}
+}
+
+func changedRowsOf(diff string) []string {
+	lines := splitSourceLines(diff)
+	layout := analyzeDiff(lines)
+	var rows []string
+	for i, l := range lines {
+		if layout.kinds[i] == diffLineHunkChange {
+			rows = append(rows, l.text)
+		}
+	}
+	return rows
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestAbridge_ChunkedTrailerBecomesOwnPieceWhenLastIsFull: when greedy
+// packing fills the section's final piece to the brim, the format-patch
+// trailer becomes its own passthrough piece (no model run) instead of
+// refusing the diff; identity abridgement stays byte-exact.
+func TestAbridge_ChunkedTrailerBecomesOwnPieceWhenLastIsFull(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n")
+	for h := 0; h < 4; h++ {
+		fmt.Fprintf(&b, "@@ -%d,1 +%d,2 @@\n context %d\n+added %d\n", h*10+1, h*10+1, h, h)
+	}
+	body := b.String()
+	trailer := "-- \n2.39.2\n\n"
+	diff := body + trailer
+	// Budget exactly fits half the body per piece, leaving no room for the
+	// trailer on the last piece.
+	budget := len(numberedDiff(body))/2 + 30
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := chunks[len(chunks)-1]
+	if !last.passthrough || last.text != trailer {
+		t.Logf("trailer attached to final piece instead; acceptable if it fit")
+	}
+	defer setSingleRunBudget(t, budget)()
+	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds rows.",
+	}))}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SmartDiff != diff {
+		t.Errorf("identity chunked abridgement altered the diff:\ngot:\n%q\nwant:\n%q", res.SmartDiff, diff)
+	}
+}
+
 func TestFitsSingleRun(t *testing.T) {
 	diff := "diff --git a/a b/a\n@@ -1 +1 @@\n+x\n"
 	if !fitsSingleRun(diff, len(numberedDiff(diff))) {
