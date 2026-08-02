@@ -611,6 +611,7 @@ func TestPromptSurfaceStaysFrozen(t *testing.T) {
 		"systemPrompt":         systemPrompt,
 		"userPrompt":           buildUserPrompt(Request{UnifiedDiff: moveDiff, RepoRoot: "/repo"}, numberedDiff(moveDiff)),
 		"userPrompt (no root)": buildUserPrompt(Request{UnifiedDiff: moveDiff}, numberedDiff(moveDiff)),
+		"userPrompt (no move)": buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff, RepoRoot: "/repo"}, numberedDiff(surfaceFixtureNoMoveDiff)),
 	}
 	tb := &toolbox{root: "/repo", rawDiff: moveDiff}
 	for _, tool := range tb.tools() {
@@ -695,7 +696,7 @@ func TestRubricHash(t *testing.T) {
 // then update the pinned hash (and bump abridgeProtocolVersion when edit
 // semantics changed).
 func TestRubricHashPinned(t *testing.T) {
-	const pinned = "ea0e4f48a4afc4ef"
+	const pinned = "54bff40b3076e80d"
 	if h := RubricHash(); h != pinned {
 		t.Errorf("RubricHash() = %q, pinned %q; the model-visible prompt surface changed — review it against the freeze policy on systemPrompt, then update the pin", h, pinned)
 	}

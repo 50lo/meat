@@ -35,14 +35,29 @@ const surfaceFixtureDiff = "diff --git a/old.txt b/old.txt\n" +
 	"+        recordSuccess(beta)\n" +
 	"+new_location_ready = true\n"
 
-// promptSurface renders every static model-visible surface over the canonical
-// fixture: the protocol version, the system prompt, the user prompt in its
-// with-tools/without-tools and move-detected branches, all tool descriptions
-// and schemas, the no-tool-call nudge, and plan feedback in its move, plain,
-// and high-pressure branches. Hashing rendered output (not a manifest of
-// fragments) means both rewording AND recomposition of anything the model can
-// read changes RubricHash, invalidating caches and tripping the pinned-hash
-// test.
+// surfaceFixtureNoMoveDiff is a canonical input with no detected move, so the
+// no-move branch of the user prompt is rendered and hashed too.
+const surfaceFixtureNoMoveDiff = "diff --git a/a.txt b/a.txt\n" +
+	"--- a/a.txt\n" +
+	"+++ b/a.txt\n" +
+	"@@ -1 +1 @@\n" +
+	"-old_value = 1\n" +
+	"+new_value = 2\n"
+
+// promptSurface renders the standing instruction surface over canonical
+// fixtures: the protocol version, the system prompt, the user prompt across
+// its with-tools/without-tools and move/no-move branches, all tool
+// descriptions and schemas, the no-tool-call nudge, and plan feedback in its
+// move, plain, and high-pressure branches. Hashing rendered output (not a
+// manifest of fragments) means both rewording AND recomposition of anything
+// on this surface changes RubricHash, invalidating caches and tripping the
+// pinned-hash test.
+//
+// Deliberately outside the surface: validation error text. Those messages are
+// plan-specific conflict feedback — the channel the frozen-surface policy
+// designates for explaining a resolution the model actually hit — and hashing
+// them would churn caches on every compiler tightening. A change that alters
+// edit SEMANTICS (not just message wording) must bump abridgeProtocolVersion.
 func promptSurface() string {
 	var b strings.Builder
 	add := func(s string) {
@@ -55,6 +70,9 @@ func promptSurface() string {
 	numbered := numberedDiff(surfaceFixtureDiff)
 	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff, RepoRoot: "/repo"}, numbered))
 	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff}, numbered))
+	numberedNoMove := numberedDiff(surfaceFixtureNoMoveDiff)
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff, RepoRoot: "/repo"}, numberedNoMove))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff}, numberedNoMove))
 	add(noToolCallNudge)
 
 	for _, tools := range [][]Tool{
