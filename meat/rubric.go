@@ -105,14 +105,21 @@ func promptSurface() string {
 	// The remaining feedback branches: plain and high retention pressure.
 	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 10, visibleChanged: 4, rawFiles: 1, visibleFiles: 1}})))
 	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 100, visibleChanged: 90, rawFiles: 2, visibleFiles: 2}})))
-	// An oversize preview through the real handler, so the handler-applied
-	// truncation and its marker are on the surface.
+	// An oversize preview and an oversize submit through the real handlers,
+	// so each handler's truncation and marker are on the surface. Submit
+	// feedback is model-visible during the automatic refinement turn.
 	oversizeTB := &toolbox{rawDiff: surfaceOversizeDiff()}
 	oversizeFeedback, isErr := oversizeTB.previewPlan([]byte(`{"remove":[],"replace":[],"fold":[]}`))
 	if isErr {
 		panic("meat: promptSurface oversize preview: " + oversizeFeedback)
 	}
 	add(oversizeFeedback)
+	submitTB := &toolbox{rawDiff: surfaceOversizeDiff()}
+	submitFeedback, isErr := submitTB.submit([]byte(`{"remove":[],"replace":[],"fold":[],"summary":"Adds rows."}`))
+	if isErr {
+		panic("meat: promptSurface oversize submit: " + submitFeedback)
+	}
+	add(submitFeedback)
 	return b.String()
 }
 
