@@ -56,9 +56,10 @@ meat reads a unified diff (from stdin, from a named revision or range, or HEAD
 when stdin is a terminal), asks an LLM to drop everything not worth reading, and
 prints the abridged diff plus a one-line summary.
 
-Results are cached under ~/.meat keyed by the SHA of (rubric version + model +
-diff contents), so re-running on an unchanged diff is instant; editing the
-diff, switching models, or upgrading meat's rubric recomputes.
+Results are cached under ~/.meat keyed by the SHA of (rubric/compiler protocol +
+model + diff contents), so re-running on an unchanged diff is instant; editing
+the diff, switching models, or upgrading meat's rubric or compiler invariants
+recomputes.
 
 On an interactive terminal the diff is colored and paged like git show (using
 your git pager and color.diff config); piped/redirected output stays plain.

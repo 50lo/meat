@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,6 +39,80 @@ func okBody(stopReason string) []byte {
 		"usage":       map[string]int{"input_tokens": 10, "output_tokens": 5},
 	})
 	return b
+}
+
+func TestAbridge_AnthropicEditPlanEndToEnd(t *testing.T) {
+	const diff = "diff --git a/a.go b/a.go\n@@ -1 +1 @@\n-old\n+new\n"
+	var m *AnthropicModel
+	var calls *int32
+	m, calls = antServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req antReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !strings.Contains(req.System, "edit plan") {
+			t.Errorf("system prompt does not describe edit plans")
+		}
+		if len(req.Tools) != 2 || req.Tools[0].Name != "preview_plan" || req.Tools[1].Name != "submit" || strings.Contains(string(req.Tools[1].InputSchema), "smart_diff") || !strings.Contains(string(req.Tools[1].InputSchema), `"fold"`) {
+			t.Errorf("unexpected plan tool schema: %+v", req.Tools)
+		}
+		if len(req.Messages) == 0 || len(req.Messages[0].Content) == 0 || !strings.Contains(req.Messages[0].Content[0].Text, "1|diff --git") {
+			t.Errorf("user prompt is not line-numbered: %+v", req.Messages)
+		}
+
+		call := atomic.LoadInt32(calls)
+		if call == 2 {
+			var sawError bool
+			for _, msg := range req.Messages {
+				for _, block := range msg.Content {
+					if block.Type == "tool_result" && block.IsError && strings.Contains(block.Content, "outside the diff") {
+						sawError = true
+					}
+				}
+			}
+			if !sawError {
+				t.Errorf("second request did not contain invalid-plan tool result")
+			}
+		}
+
+		input := map[string]any{
+			"remove":  []any{},
+			"replace": []any{map[string]any{"line": 99, "old": "new", "new": "..."}},
+			"fold":    []any{},
+			"summary": "Changes the value.",
+		}
+		if call == 2 {
+			input = map[string]any{
+				"remove":  []any{map[string]any{"start_line": 3, "end_line": 3}},
+				"replace": []any{map[string]any{"line": 4, "old": "new", "new": "n..."}},
+				"fold":    []any{},
+				"summary": "Changes the value.",
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"content": []any{map[string]any{
+				"type":  "tool_use",
+				"id":    "submit-plan",
+				"name":  "submit",
+				"input": input,
+			}},
+			"stop_reason": "tool_use",
+			"usage":       map[string]int{"input_tokens": 10, "output_tokens": 5},
+		})
+	})
+
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(calls); got != 2 {
+		t.Fatalf("HTTP model calls = %d, want invalid plan plus corrected plan", got)
+	}
+	if strings.Contains(res.SmartDiff, "-old") || !strings.Contains(res.SmartDiff, "+n...") {
+		t.Fatalf("derived reading diff =\n%s", res.SmartDiff)
+	}
 }
 
 // TestGenerate_RetriesTransient verifies a 429 and a 529 are retried and the

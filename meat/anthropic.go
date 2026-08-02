@@ -39,8 +39,8 @@ func ResolveModel(model string) string {
 }
 
 // maxOutputTokens is the per-turn output cap sent to the API. Large enough for
-// a sizable abridged diff in a single submit call; a response that still stops
-// at max_tokens is reported as an error rather than silently truncated.
+// an edit plan over a sizable diff; a response that still stops at max_tokens
+// is reported as an error rather than silently truncated.
 const maxOutputTokens = 16384
 
 // implicitGatewayKey is the placeholder API key sent to the exe.dev LLM

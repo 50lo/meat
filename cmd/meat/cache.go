@@ -24,10 +24,10 @@ func cacheDir() string {
 }
 
 // cacheKey is the content hash that names a cached result. It covers every
-// input that shapes the answer: the diff text, the model id, and the rubric
-// (via its hash) — so editing the diff, switching models, or upgrading meat to
-// a tuned rubric all miss the cache and recompute, while an identical re-run
-// hits.
+// input that shapes the answer: the diff text, the model id, and the complete
+// rubric/compiler protocol (via its hash) — so editing the diff, switching
+// models, or upgrading either model guidance or a hard compiler invariant
+// misses the cache and recomputes, while an identical re-run hits.
 func cacheKey(diff, model, rubric string) string {
 	h := sha256.New()
 	// NUL separators keep field boundaries unambiguous: a NUL can't appear in

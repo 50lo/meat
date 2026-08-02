@@ -81,8 +81,8 @@ func formatBody(res *meat.Result, elision string, p diffPalette) string {
 		}
 	}
 	if elision != "" {
-		// The manifest is computed locally from the two diffs — not by the
-		// LLM — so the reviewer can always see how much they are not reading.
+		// The manifest is computed locally from the source-derived result rather
+		// than from model-reported counts.
 		fmt.Fprintf(&b, "# %s\n", elision)
 	}
 	if b.Len() > 0 {

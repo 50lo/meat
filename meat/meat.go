@@ -9,8 +9,9 @@
 // changed, where did it come from, where did it go".
 //
 // meat takes a whole unified diff (spanning as many files as it touches) and
-// asks an LLM agent to produce a "reading diff": the same change, rewritten to
-// elide the noise and keep only what carries meaning. The agent has read-only
+// asks an LLM agent for an edit plan that removes noise while retaining what
+// carries meaning. Meat applies the plan to the immutable input itself, so the
+// model never authors the displayed diff wholesale. The agent has read-only
 // access to the surrounding source tree so it can use clues to decide what is
 // load-bearing.
 //
@@ -36,10 +37,14 @@ const defaultMaxTurns = 24
 // run can't hang forever.
 const defaultBudget = 4 * time.Minute
 
-// maxDiffBytes bounds the size of a diff accepted in one Abridge call. The
-// whole diff is sent to the model up front (and re-sent every turn), so a huge
-// diff would blow the context window — better to refuse with advice than to
-// fail with a raw API error deep into the run.
+// abridgeBudget is a variable so deadline/fallback behavior can be tested
+// without waiting for the production budget.
+var abridgeBudget = defaultBudget
+
+// maxDiffBytes bounds both the raw diff and its numbered form accepted in one
+// Abridge call. The numbered whole diff is sent up front (and re-sent every
+// turn), so a huge input would blow the context window — better to refuse with
+// advice than fail with a raw API error deep into the run.
 const maxDiffBytes = 400 << 10 // ~400 KB ≈ 100k+ tokens of code
 
 // Request is a whole-diff abridgement request. The diff may span many files;
@@ -64,8 +69,10 @@ type Request struct {
 // Result is the abridged reading diff. The json tags give embedders and the
 // CLI's -json output a stable snake_case wire form.
 type Result struct {
-	// SmartDiff is the abridged unified diff. Empty when no meaningful change
-	// remains after abridging.
+	// SmartDiff is the abridged reading diff. It preserves unified-diff shape
+	// for navigation and coloring, but is not intended to be an applicable
+	// patch: removed lines may leave original hunk counts stale. Empty when no
+	// meaningful change remains after abridging.
 	SmartDiff string `json:"smart_diff"`
 	// Summary is a one-line, high-level description of the change.
 	Summary string `json:"summary"`
@@ -86,21 +93,29 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	if len(req.UnifiedDiff) > maxDiffBytes {
 		return nil, fmt.Errorf("meat: diff is %dKB, over the %dKB limit — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(req.UnifiedDiff)>>10, maxDiffBytes>>10)
 	}
+	numbered := numberedDiff(req.UnifiedDiff)
+	if len(numbered) > maxDiffBytes {
+		return nil, fmt.Errorf("meat: numbered diff expands to %dKB, over the %dKB context limit — try a narrower range", len(numbered)>>10, maxDiffBytes>>10)
+	}
+	if err := validateSupportedDiff(req.UnifiedDiff); err != nil {
+		return nil, fmt.Errorf("meat: %w", err)
+	}
 
 	maxTurns := req.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = defaultMaxTurns
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, defaultBudget)
+	callerCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, abridgeBudget)
 	defer cancel()
 
-	tb := &toolbox{root: req.RepoRoot}
+	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff}
 	tools := tb.tools()
 
 	messages := []Message{{
 		Role:    RoleUser,
-		Content: []Block{textBlock(buildUserPrompt(req))},
+		Content: []Block{textBlock(buildUserPrompt(req, numbered))},
 	}}
 
 	progress := req.Progress
@@ -109,11 +124,18 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	}
 
 	var inTok, outTok int
+	var retentionNudged bool
+	var fallback *Result
 
 	for turn := 0; turn < maxTurns; turn++ {
 		progress(fmt.Sprintf("thinking (turn %d)", turn+1))
 		resp, err := model.Generate(ctx, systemPrompt, messages, tools)
 		if err != nil {
+			if fallback != nil && callerCtx.Err() == nil {
+				fallback.InputTokens = inTok
+				fallback.OutputTokens = outTok
+				return fallback, nil
+			}
 			return nil, fmt.Errorf("meat: model generate: %w", err)
 		}
 		inTok += resp.InputTokens
@@ -137,12 +159,22 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 		}
 
 		if tb.submitSeen {
-			return &Result{
-				SmartDiff:    tb.submitted.SmartDiff,
+			candidate := &Result{
+				SmartDiff:    tb.smartDiff,
 				Summary:      tb.submitted.Summary,
 				InputTokens:  inTok,
 				OutputTokens: outTok,
-			}, nil
+			}
+			canRefine := !retentionNudged && turn+1 < maxTurns &&
+				tb.submittedPlan != nil && retentionPressure(tb.submittedPlan.stats)
+			if canRefine {
+				fallback = candidate
+				retentionNudged = true
+				tb.clearSubmission()
+				messages = append(messages, Message{Role: RoleUser, Content: results})
+				continue
+			}
+			return candidate, nil
 		}
 
 		if len(results) == 0 {
@@ -150,29 +182,38 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 			// submitting; the loop bound prevents this from running away.
 			messages = append(messages, Message{
 				Role:    RoleUser,
-				Content: []Block{textBlock("Call the submit tool with your abridged diff and one-line summary. If nothing meaningful changed, submit an empty smart_diff and say so in the summary.")},
+				Content: []Block{textBlock("Call preview_plan or submit with a complete remove/replace/fold plan against the numbered ORIGINAL diff. Prefer removals and fixed multiline folds; use replace only for a local single-line elision. If nothing meaningful changed, remove every original line.")},
 			})
 			continue
 		}
 		messages = append(messages, Message{Role: RoleUser, Content: results})
 	}
 
+	if fallback != nil {
+		if err := callerCtx.Err(); err != nil {
+			return nil, fmt.Errorf("meat: caller context: %w", err)
+		}
+		fallback.InputTokens = inTok
+		fallback.OutputTokens = outTok
+		return fallback, nil
+	}
 	return nil, fmt.Errorf("meat: agent did not submit within %d turns", maxTurns)
 }
 
-func buildUserPrompt(req Request) string {
+func buildUserPrompt(req Request, numbered string) string {
 	var b strings.Builder
-	b.WriteString("Abridge the following unified diff into a reading diff. The diff may span multiple files; reason across them and keep the per-file structure (diff/--- /+++ headers) so the reviewer can tell which file each hunk belongs to.\n")
+	b.WriteString("Abridge the following unified diff into a reading diff by submitting a complete remove/replace/fold plan against the numbered original lines. Meat applies your plan to the original diff; you do not write the resulting diff yourself. Coordinates are 1-based and always refer to the original numbering. The `N|` gutter is display-only and is not part of a line's source text. Use preview_plan to inspect sizeable drafts before submit.\n")
+	b.WriteString("Meat automatically derives and merges a mandatory removal plan for imports/includes/requires/use declarations, including multiline blocks and recognized imports inside embedded source strings. They may appear in the numbered input but never in a preview or result. Mandatory hiding wins before move enforcement and extends to exact aligned counterparts even when file extensions classify them differently; compiler-owned Python suite placeholders need no model edits. Do not spend model edit coordinates on these rows, and never fold across them into behavioral rows.\n")
+	if moves := detectedMovesInDiff(req.UnifiedDiff); len(moves) > 0 {
+		fmt.Fprintf(&b, "Meat detected exact source-evidenced moves across hunks/files: %s. Apply identical model-authored keep/remove/fold treatment to every remaining behavioral pair, including matching fold boundaries; asymmetric plans are rejected.\n", formatMovePairs(moves, maxMoveHints))
+	}
 	if req.RepoRoot != "" {
-		b.WriteString("Use read_file/grep on the surrounding source only when it changes your judgment about what is load-bearing (or whether a file is generated), then call submit.\n")
+		b.WriteString("Use read_file/grep on the surrounding source only when it changes your judgment about what is load-bearing (or whether a file is generated), then preview or submit.\n")
 	} else {
-		b.WriteString("Judge from the diff text alone, then call submit.\n")
+		b.WriteString("Judge from the diff text alone, then preview or submit.\n")
 	}
-	b.WriteString("\n```diff\n")
-	b.WriteString(req.UnifiedDiff)
-	if !strings.HasSuffix(req.UnifiedDiff, "\n") {
-		b.WriteByte('\n')
-	}
+	b.WriteString("Prefer removing whole lines or ranges. Use fold to replace two or more contiguous same-polarity hunk lines with one machine-generated, indentation-preserving `...` row. Use replace only to elide part of one source line; `new` must match all of `old` with every omitted span visibly represented by `...` or `…`. Keep useful per-file and hunk structure unless the entire file or hunk is noise.\n\n```diff\n")
+	b.WriteString(numbered)
 	b.WriteString("```\n")
 	return b.String()
 }
@@ -193,6 +234,8 @@ func describeToolCall(b Block) string {
 		}
 		json.Unmarshal(b.ToolInput, &in)
 		return strings.TrimSpace(fmt.Sprintf("grep %q", in.Pattern))
+	case "preview_plan":
+		return "previewing"
 	case "submit":
 		return "submitting"
 	default:

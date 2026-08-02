@@ -12,9 +12,42 @@ where did data come from, where did it go, what new control flow appeared.*
 
 `meat` feeds the whole diff to an LLM agent (with read-only `read_file`/`grep`
 access to the surrounding repo, so it can use clues to decide what's
-load-bearing) and prints the abridged diff plus a one-line summary. A
-machine-computed elision manifest (`# kept 12/240 changed lines in 3/7 files`)
-shows at a glance how much you are *not* reading — the LLM has no say in it.
+load-bearing). The agent does **not** regenerate the displayed diff wholesale. It
+submits inclusive original-line ranges to remove, contiguous same-polarity source
+ranges to collapse into machine-generated, indentation-preserving `...` rows,
+and exact source substrings for local single-line elisions. Before validation,
+Meat deterministically derives a mandatory source-coordinate removal plan for
+imports/includes/requires/use declarations and merges it with the model plan.
+Meat validates and previews the merged plan, then applies it locally to the
+immutable input. The agent never authors fold text or rewrites the displayed
+diff wholesale: every non-ellipsis character in a rewritten span—and every
+unchanged byte elsewhere—came from the original diff.
+
+For sizeable plans the agent can call `preview_plan` to inspect the projected
+reading diff and retention statistics before submission. A high-retention
+submission gets one advisory refinement turn, with the first valid draft kept as
+a safe fallback. Retention is never a hard quota.
+
+The compiler removes import/include/require/use scaffolding automatically and
+hermetically — including package substitutions, complete multiline blocks,
+import-only hunks/files and their framing, and recognized import rows embedded
+in test source strings. This is a machine invariant, not a request to the LLM:
+identity plans, previews, submissions, refinement drafts, and fallbacks are all
+import-free. On exact moves this mandatory hiding wins first: an aligned
+counterpart is hidden too even when its file extension classifies the row
+differently, and compiler-owned Python suite placeholders do not count as
+model folds. Symmetry remains strict for model-authored compression of the
+remaining behavioral rows. Folds that cross from mandatory import rows into
+behavioral rows are rejected.
+
+The reading diff deliberately preserves the original hunk headings for
+orientation rather than recomputing an applicable patch. After elision, hunk
+line counts may therefore be stale.
+
+The result is printed with a one-line summary. A machine-computed elision
+manifest (`# kept 12/240 changed lines in 3/7 files`) shows at a glance how much
+you are *not* reading; the counts come from the locally applied result, not from
+numbers reported by the LLM.
 
 ## Install / run
 
@@ -53,10 +86,11 @@ LLM gateway automatically — no API key needed. Otherwise it requires
 The default model is Claude Opus 4.8.
 
 Results are cached under `~/.meat`, keyed by the SHA-256 of the model, the
-rubric version, and the diff contents. Re-running on an unchanged diff is
-instant; editing the diff, switching models, or upgrading meat to a tuned
-rubric recomputes. Pass `-no-cache` to force a recompute, set `MEAT_CACHE` to
-use a different directory, or `MEAT_CACHE=` to disable caching.
+rubric/compiler-protocol version, and the diff contents. Re-running on an
+unchanged diff is instant; editing the diff, switching models, or upgrading
+meat to a tuned rubric or changed compiler invariant recomputes. Pass
+`-no-cache` to force a recompute, set `MEAT_CACHE` to use a different
+directory, or `MEAT_CACHE=` to disable caching.
 
 On an interactive terminal `meat` renders like `git show`: the diff is colored
 with your git diff colors and shown through your git pager. Piped or redirected
@@ -85,5 +119,22 @@ by adapting an existing LLM client — no shared LLM dependency required.
 
 ## Tuning
 
-Edit `meat/rubric.go`. It's a single string with concrete worked examples — the
-one knob to tune as new categories of noise show up.
+Edit `meat/rubric.go` to tune model judgment. Hard source-derived invariants
+such as mandatory import removal live in the compiler (`meat/imports.go`) and
+must be covered by hermetic tests rather than rubric examples alone.
+
+The checked-in Python corpus also gates reading quality, not just renderer
+correctness. Its source-coordinate plans must preserve semantic anchors while
+staying within deterministic absolute budgets: **194/411 changed rows,
+340/722 physical rows, and 14,337/29,739 bytes** across the three fixtures.
+Those plans deliberately contain no import coordinates—the compiler owns import
+hiding—and the pytest relocation must satisfy exact move symmetry. These
+hermetic goldens are the hard gates: snapshot bytes, semantic anchors, and
+budgets are deterministic. The opt-in `MEAT_E2E=1` tests are costed, stochastic
+rubric smoke tests with empirically calibrated retention ceilings and stable
+semantic minima; they are not expected to reproduce the hand-authored plans.
+When tuning, prefer one representative rename/call-site anchor, remove context
+that adds no orientation, compress repetitive test setup/assertions, and retain
+required setup, contracts, security/compatibility caveats, conditions,
+transformations, effects, distinctive stimuli, and outcomes. See
+`meat/testdata/python/README.md` before updating snapshots or budgets.
