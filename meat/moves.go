@@ -393,6 +393,51 @@ func validateMoveSymmetry(moves []detectedMove, state planState, mandatory []boo
 	return nil
 }
 
+func validateMoveReplacementSymmetry(moves []detectedMove, lines []sourceLine, state planState, mandatory []bool, replacements map[int][]plannedReplacement) error {
+	var problems []error
+	for _, move := range moves {
+		rows := move.Removed.EndLine - move.Removed.StartLine + 1
+		for offset := 0; offset < rows; offset++ {
+			removedLine := move.Removed.StartLine + offset
+			addedLine := move.Added.StartLine + offset
+
+			// Keep/remove/fold symmetry is validated separately. Local replacements
+			// can only target represented rows, so compare them when both aligned
+			// rows remain verbatim source lines.
+			if compressionAt(state, mandatory, removedLine) != moveKept ||
+				compressionAt(state, mandatory, addedLine) != moveKept {
+				continue
+			}
+			removedEdits := replacements[removedLine]
+			addedEdits := replacements[addedLine]
+			if len(removedEdits) == 0 && len(addedEdits) == 0 {
+				continue
+			}
+
+			removedBody := lines[removedLine-1].text[1:]
+			addedBody := lines[addedLine-1].text[1:]
+			if len(removedEdits) > 0 {
+				removedBody = applyPlannedReplacements(removedBody, removedEdits)
+			}
+			if len(addedEdits) > 0 {
+				addedBody = applyPlannedReplacements(addedBody, addedEdits)
+			}
+			if normalizeMoveLine(removedBody).normalized == normalizeMoveLine(addedBody).normalized {
+				continue
+			}
+
+			problems = append(problems, fmt.Errorf(
+				"move symmetry: removed lines %d-%d match added lines %d-%d after indentation normalization; corresponding kept lines %d and %d have different model-authored local elisions. Apply equivalent replacements to both sides or keep both lines verbatim",
+				move.Removed.StartLine, move.Removed.EndLine, move.Added.StartLine, move.Added.EndLine, removedLine, addedLine,
+			))
+		}
+	}
+	if len(problems) > 0 {
+		return joinEditPlanErrors(problems)
+	}
+	return nil
+}
+
 func detectedMovesInDiff(raw string) []detectedMove {
 	lines := splitSourceLines(raw)
 	layout := analyzeDiff(lines)

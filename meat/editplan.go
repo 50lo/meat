@@ -458,6 +458,11 @@ func compileEditPlan(raw string, in editPlan) (compiledPlan, error) {
 		}
 		replacements[lineNo] = edits
 	}
+	if removalsValid && foldsValid && replacementsValid && len(problems) == 0 {
+		if err := validateMoveReplacementSymmetry(moves, lines, state, mandatoryHidden, replacements); err != nil {
+			problems = append(problems, err)
+		}
+	}
 	if removalsValid && foldsValid && replacementsValid {
 		if err := validateTripleQuoteParity(lines, layout, pythonValidationState, replacements); err != nil {
 			problems = append(problems, err)

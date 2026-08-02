@@ -8,7 +8,7 @@ import (
 // abridgeProtocolVersion covers the machine-side edit protocol as well as the
 // prose rubric. Changing the submit schema or edit semantics must invalidate
 // cached results even when the high-level advice is unchanged.
-const abridgeProtocolVersion = "source-edit-plan-v7-corpus-density-import-move-precedence"
+const abridgeProtocolVersion = "source-edit-plan-v8-local-elision-move-symmetry"
 
 // RubricHash returns a short content hash of the complete abridging protocol.
 // Callers that cache Abridge results should mix it into their cache key.
@@ -45,7 +45,7 @@ Default unified-diff context is not valuable by default. File and hunk headings 
 
 6. IMPORTS ARE REMOVED AUTOMATICALLY, WITHOUT EXCEPTION. Meat's compiler derives a mandatory source-coordinate removal plan for imports, includes, requires, and use declarations and merges it with your plan before every preview or submission. This includes package swaps, aliases, multiline blocks, unchanged framing rows, and import statements inside embedded source snippets or multiline test-fixture strings. Mandatory hiding has precedence over exact-move enforcement: if a compiler-hidden row has an exact aligned move counterpart, Meat hides that counterpart too even when the two file extensions classify imports differently. Compiler-owned Python suite placeholders may represent the hidden body without becoming model folds. Do not spend remove/fold/replace coordinates on these rows and do not mention them in the summary; shape only the behavioral rows around the import-free preview.
 
-7. TREAT BEHAVIORAL MOVES SYMMETRICALLY. After mandatory import hiding is resolved, Meat conservatively detects exact source-evidenced moves across hunks and files and reports their paired original coordinates. For every remaining aligned behavioral row, use identical model-authored keep/remove/fold treatment on both sides, including matching fold boundaries. A moved behavioral block must read as relocation, never as a one-sided deletion.
+7. TREAT BEHAVIORAL MOVES SYMMETRICALLY. After mandatory import hiding is resolved, Meat conservatively detects exact source-evidenced moves across hunks and files and reports their paired original coordinates. For every remaining aligned behavioral row, use identical model-authored keep/remove/fold/replace treatment on both sides, including matching fold boundaries and equivalent local elisions. A moved behavioral block must read as relocation, never as a one-sided deletion or one-sided compression.
 
 8. NEVER invent or alter program logic. Removal and compression are allowed; lying is not. If unsure whether something matters, KEEP it.
 
@@ -63,7 +63,7 @@ The input gutter has the form N|source. N is a 1-based physical line number in t
 - Never include the numbered gutter or leading diff marker in old.
 - Do not replace or fold diff metadata or hunk headers. Remove metadata only as part of dropping its complete file or hunk.
 - Every preview and submission is a complete model plan against the ORIGINAL diff, not an incremental edit of a prior preview. Meat then merges the deterministic mandatory import-removal plan derived from that same original source. Imports may still appear in the numbered input, but they are absent from every preview, accepted result, refinement fallback, and identity plan. When an exact move aligns a mandatory row with a counterpart whose file extension classifies it differently, mandatory hiding propagates to the counterpart so neither copy leaks.
-- When Meat reports an exact move pair such as -72..81 ↔ +23..32, corresponding behavioral rows must have identical model-authored keep/remove/fold treatment, including fold starts and ends. Compiler-mandatory rows and their fixed suite placeholders are resolved first and need no matching model coordinates; the compiler still rejects asymmetric compression of the remaining behavioral rows.
+- When Meat reports an exact move pair such as -72..81 ↔ +23..32, corresponding behavioral rows must have identical model-authored keep/remove/fold/replace treatment, including fold starts and ends and equivalent local elisions. Compiler-mandatory rows and their fixed suite placeholders are resolved first and need no matching model coordinates; the compiler still rejects asymmetric compression of the remaining behavioral rows.
 - Do not fold across a mandatory import row and behavioral rows; the compiler rejects that ambiguous boundary. Fold only the behavioral range. Import-only folds and edits are redundant.
 - Submit empty remove, replace, and fold arrays when no edits of that kind are needed.
 - Retention feedback is advisory, not a quota. If it says retention is high, make one more pass over obvious suites and repetition, but keep uncertain or semantically distinct code.

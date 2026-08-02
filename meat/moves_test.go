@@ -181,6 +181,54 @@ func TestCompileEditPlan_MoveSymmetry(t *testing.T) {
 	}
 }
 
+func TestCompileEditPlan_MoveReplacementSymmetry(t *testing.T) {
+	t.Run("equivalent local elisions", func(t *testing.T) {
+		compiled, err := compileEditPlan(exactMoveDiff, editPlan{Replace: []lineReplacement{
+			{Line: 8, Old: "beta", New: "..."},
+			{Line: 18, Old: "beta", New: "..."},
+		}})
+		if err != nil {
+			t.Fatalf("compileEditPlan: %v", err)
+		}
+		if strings.Count(compiled.smartDiff, "publish(...)") != 2 {
+			t.Fatalf("symmetric replacements not applied to both move endpoints:\n%s", compiled.smartDiff)
+		}
+	})
+
+	t.Run("one-sided local elision", func(t *testing.T) {
+		_, err := compileEditPlan(exactMoveDiff, editPlan{Replace: []lineReplacement{
+			{Line: 8, Old: "beta", New: "..."},
+		}})
+		for _, want := range []string{
+			"move symmetry",
+			"removed lines 6-9 match added lines 16-19",
+			"corresponding kept lines 8 and 18 have different model-authored local elisions",
+		} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("compileEditPlan error = %v, want %q", err, want)
+			}
+		}
+	})
+
+	t.Run("different local elisions", func(t *testing.T) {
+		_, err := compileEditPlan(exactMoveDiff, editPlan{Replace: []lineReplacement{
+			{Line: 8, Old: "beta", New: "..."},
+			{Line: 18, Old: "beta", New: "b..."},
+		}})
+		if err == nil || !strings.Contains(err.Error(), "different model-authored local elisions") {
+			t.Fatalf("compileEditPlan error = %v, want local-elision move symmetry rejection", err)
+		}
+	})
+
+	t.Run("replacement outside move", func(t *testing.T) {
+		if _, err := compileEditPlan(exactMoveDiff, editPlan{Replace: []lineReplacement{
+			{Line: 20, Old: "location_ready", New: "location_..."},
+		}}); err != nil {
+			t.Fatalf("replacement outside detected move: %v", err)
+		}
+	})
+}
+
 const importOnlyPythonMoveDiff = "diff --git a/moved.py b/moved.py\n" +
 	"--- a/moved.py\n" +
 	"+++ b/moved.py\n" +
