@@ -193,6 +193,79 @@ func TestSplitDiff_UnsplittableSectionFails(t *testing.T) {
 	}
 }
 
+// TestSplitDiff_SynthesizedHeadersUseGapConvention pins the unified-diff
+// coordinate convention for synthesized segment headers: a side with no rows
+// in the segment names the line BEFORE the gap, and a side with rows names
+// its first row, continuing the original starts by rows already consumed.
+func TestSplitDiff_SynthesizedHeadersUseGapConvention(t *testing.T) {
+	meta := "diff --git a/a b/a\n--- a/a\n+++ b/a\n"
+	diff := meta + "@@ -10,2 +20,2 @@\n-old10\n-old11\n+new20\n+new21\n"
+	budget := len(numberedDiff(meta + "@@ -10,1 +19,0 @@\n-old10\n"))
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireValidChunks(t, chunks, budget)
+	want := []string{
+		"@@ -10,1 +19,0 @@\n-old10\n",
+		"@@ -11,1 +19,0 @@\n-old11\n",
+		"@@ -11,0 +20,1 @@\n+new20\n",
+		"@@ -11,0 +21,1 @@\n+new21\n",
+	}
+	if len(chunks) != len(want) {
+		t.Fatalf("chunks = %d, want %d single-row segments", len(chunks), len(want))
+	}
+	for i, c := range chunks {
+		if c.text != meta+want[i] {
+			t.Errorf("chunk %d = %q, want %q", i, c.text, meta+want[i])
+		}
+	}
+}
+
+// TestSplitDiff_ZeroStartClampsAtZero: splitting a new-file hunk (old side
+// @@ -0,0) must not synthesize a negative old start.
+func TestSplitDiff_ZeroStartClampsAtZero(t *testing.T) {
+	meta := "diff --git a/a b/a\n--- /dev/null\n+++ b/a\n"
+	diff := meta + "@@ -0,0 +1,4 @@\n+r0\n+r1\n+r2\n+r3\n"
+	budget := len(numberedDiff(meta + "@@ -0,0 +1,2 @@\n+r0\n+r1\n"))
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireValidChunks(t, chunks, budget)
+	for i, c := range chunks {
+		if !strings.Contains(c.text, "@@ -0,0 ") {
+			t.Errorf("chunk %d old side = should stay -0,0:\n%s", i, c.text)
+		}
+	}
+}
+
+// TestSplitDiff_PreservesCRLF: synthesized segment headers adopt the original
+// hunk header's line ending, so a CRLF diff stays CRLF throughout.
+func TestSplitDiff_PreservesCRLF(t *testing.T) {
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	meta := crlf("diff --git a/a b/a\n--- a/a\n+++ b/a\n")
+	var body strings.Builder
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&body, "+row %d\r\n", i)
+	}
+	diff := meta + crlf("@@ -0,0 +1,12 @@\n") + body.String()
+	budget := len(numberedDiff(diff))/2 + 60
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireValidChunks(t, chunks, budget)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want a real split", len(chunks))
+	}
+	for i, c := range chunks {
+		if strings.Contains(strings.ReplaceAll(c.text, "\r\n", ""), "\n") {
+			t.Errorf("chunk %d contains a bare LF line (synthesized header?):\n%q", i, c.text)
+		}
+	}
+}
+
 func TestSplitDiff_OverlongSingleLineFails(t *testing.T) {
 	diff := "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+" + strings.Repeat("x", 500) + "\n"
 	_, err := splitDiffForAbridging(diff, 200)
@@ -363,6 +436,115 @@ func TestAbridge_ChunkedMergeKeepsMetaWhenFirstPieceEmpty(t *testing.T) {
 	}
 	if !strings.Contains(res.SmartDiff, "+added 2") || strings.Contains(res.SmartDiff, "+added 0") {
 		t.Errorf("merged diff should carry only the second piece's hunks:\n%s", res.SmartDiff)
+	}
+}
+
+// TestSplitDiff_PreambleTravelsWithFirstPieceOnly: non-file preamble (a git
+// show / format-patch message) ahead of a split file section rides the first
+// piece and is never replicated onto continuations, and metaPrefix contains
+// only the file's own metadata block.
+func TestSplitDiff_PreambleTravelsWithFirstPieceOnly(t *testing.T) {
+	preamble := "commit 0123456789abcdef\nAuthor: A U Thor <a@example.com>\n\n    Big change.\n\n"
+	var b strings.Builder
+	b.WriteString(preamble)
+	b.WriteString("diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n")
+	for h := 0; h < 4; h++ {
+		fmt.Fprintf(&b, "@@ -%d,1 +%d,2 @@ func f%d()\n context %d\n+added %d\n", h*10+1, h*10+1, h, h, h)
+	}
+	diff := b.String()
+	budget := len(numberedDiff(diff))/2 + 90
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireValidChunks(t, chunks, budget)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want a real split", len(chunks))
+	}
+	if !strings.HasPrefix(chunks[0].text, preamble) {
+		t.Errorf("first piece lost the preamble:\n%s", chunks[0].text)
+	}
+	for i, c := range chunks {
+		if strings.Contains(c.metaPrefix, "commit ") {
+			t.Errorf("chunk %d metaPrefix includes preamble:\n%s", i, c.metaPrefix)
+		}
+		if i > 0 && strings.Contains(c.text, "commit ") {
+			t.Errorf("chunk %d replicated the preamble:\n%s", i, c.text)
+		}
+		if !strings.Contains(c.text, "diff --git a/big.go") {
+			t.Errorf("chunk %d lost file metadata:\n%s", i, c.text)
+		}
+	}
+}
+
+// TestAbridge_ChunkedRetainedPreambleKeepsContinuationHeaders: when the first
+// piece elides its whole file section but retains preamble prose, the
+// continuation piece's replicated file headers are the file's only headers
+// and must not be stripped — otherwise its hunks would be orphaned under the
+// commit message.
+func TestAbridge_ChunkedRetainedPreambleKeepsContinuationHeaders(t *testing.T) {
+	preamble := "commit 0123456789abcdef\nAuthor: A U Thor <a@example.com>\n\n    Big change.\n\n"
+	var b strings.Builder
+	b.WriteString(preamble)
+	b.WriteString("diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n")
+	for h := 0; h < 4; h++ {
+		fmt.Fprintf(&b, "@@ -%d,1 +%d,2 @@ func f%d()\n context %d\n+added %d\n", h*10+1, h*10+1, h, h, h)
+	}
+	diff := b.String()
+	budget := len(numberedDiff(diff))/2 + 90
+	defer setSingleRunBudget(t, budget)()
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil || len(chunks) != 2 {
+		t.Fatalf("chunks = %d (%v), want 2", len(chunks), err)
+	}
+
+	// First chunk: remove the whole file section but keep the preamble.
+	fileStart := len(splitSourceLines(preamble)) + 1
+	firstLen := len(splitSourceLines(chunks[0].text))
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("s1", "submit", submission{
+			Remove: []lineRange{{StartLine: fileStart, EndLine: firstLen}}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Nothing meaningful.",
+		})),
+		assistant(toolUse("s2", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds rows.",
+		})),
+	}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.SmartDiff, "commit 0123456789abcdef") {
+		t.Errorf("merged diff lost retained preamble:\n%s", res.SmartDiff)
+	}
+	if got := strings.Count(res.SmartDiff, "diff --git a/big.go"); got != 1 {
+		t.Errorf("merged diff has %d file headers, want the continuation's kept: \n%s", got, res.SmartDiff)
+	}
+	idx := strings.Index(res.SmartDiff, "@@")
+	if hdr := strings.Index(res.SmartDiff, "diff --git"); idx >= 0 && (hdr < 0 || hdr > idx) {
+		t.Errorf("merged diff has orphaned hunks before any file header:\n%s", res.SmartDiff)
+	}
+}
+
+// TestAbridge_ChunkedPreservesMissingFinalNewline: identity plans over a
+// chunked diff whose last line has no trailing newline reproduce the input
+// byte-for-byte; the merge step must not append one.
+func TestAbridge_ChunkedPreservesMissingFinalNewline(t *testing.T) {
+	diff := strings.TrimSuffix(fileSection("alpha.go", 10)+fileSection("beta.go", 10), "\n")
+	defer setSingleRunBudget(t, 400)()
+	if fitsSingleRun(diff, 400) {
+		t.Fatal("fixture should exceed the shrunken budget")
+	}
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("s", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds rows.",
+		})),
+	}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SmartDiff != diff {
+		t.Errorf("identity chunked abridgement altered the diff;\ngot:\n%q\nwant:\n%q", res.SmartDiff, diff)
 	}
 }
 

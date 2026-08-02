@@ -187,15 +187,11 @@ func (b *chunkBuilder) spanFits(start, end int) bool {
 	return b.fits(b.spanSizes(start, end))
 }
 
-func (b *chunkBuilder) metaSpanFits(meta lineSpan, start, end int) bool {
-	mt, mr, mc := b.spanSizes(meta.start, meta.end)
-	t, r, c := b.spanSizes(start, end)
-	return b.fits(mt+t, mr+r, mc+c)
-}
-
 // splitSection cuts one oversized file section into pieces at hunk
-// boundaries, replicating the metadata block on every piece; a hunk that is
-// itself oversized is split further by splitHunk.
+// boundaries, replicating the file-metadata block on every piece; a hunk
+// that is itself oversized is split further by splitHunk. Preamble lines
+// before the file's metadata (e.g. a git show commit message) travel with the
+// first piece only and are never replicated.
 func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 	firstHunk := s.end
 	for i := s.start; i < s.end; i++ {
@@ -208,7 +204,16 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 		return fmt.Errorf("file section at line %d is %dKB with no hunks to split — try a narrower diff (per-file with `git diff -- <path> | meat`)",
 			s.start+1, (b.prefixRaw[s.end]-b.prefixRaw[s.start])>>10)
 	}
-	meta := lineSpan{start: s.start, end: firstHunk}
+	metaStart := firstHunk
+	for i := s.start; i < firstHunk; i++ {
+		if b.layout.fileID[i] >= 0 {
+			metaStart = i
+			break
+		}
+	}
+	preamble := lineSpan{start: s.start, end: metaStart}
+	preambleText := b.rangeText(preamble.start, preamble.end)
+	meta := lineSpan{start: metaStart, end: firstHunk}
 	metaText := b.rangeText(meta.start, meta.end)
 
 	var hunks []lineSpan
@@ -222,35 +227,56 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 	}
 
 	piece := 0
-	emit := func(text string) {
+	emit := func(body string) {
+		prefix := metaText
+		if piece == 0 {
+			prefix = preambleText + metaText
+		}
 		b.chunks = append(b.chunks, diffChunk{
-			text:         text,
+			text:         prefix + body,
 			metaPrefix:   metaText,
 			sectionID:    sectionID,
 			continuation: piece > 0,
 		})
 		piece++
 	}
+	// prefixSizes is the byte/line cost every piece pays before its body: the
+	// replicated metadata, plus the preamble on the first piece.
+	prefixSizes := func() (textLen, rawLen, count int) {
+		textLen, rawLen, count = b.spanSizes(meta.start, meta.end)
+		if piece == 0 {
+			pt, pr, pc := b.spanSizes(preamble.start, preamble.end)
+			textLen += pt
+			rawLen += pr
+			count += pc
+		}
+		return
+	}
+	runFits := func(start, end int) bool {
+		pt, pr, pc := prefixSizes()
+		t, r, c := b.spanSizes(start, end)
+		return b.fits(pt+t, pr+r, pc+c)
+	}
 
 	open := -1 // start line of the accumulating hunk run
 	openEnd := 0
 	flush := func() {
 		if open >= 0 {
-			emit(metaText + b.rangeText(open, openEnd))
+			emit(b.rangeText(open, openEnd))
 			open = -1
 		}
 	}
 	for _, h := range hunks {
-		if open >= 0 && b.metaSpanFits(meta, open, h.end) {
+		if open >= 0 && runFits(open, h.end) {
 			openEnd = h.end
 			continue
 		}
 		flush()
-		if b.metaSpanFits(meta, h.start, h.end) {
+		if runFits(h.start, h.end) {
 			open, openEnd = h.start, h.end
 			continue
 		}
-		if err := b.splitHunk(meta, metaText, h, emit); err != nil {
+		if err := b.splitHunk(h, prefixSizes, emit); err != nil {
 			return err
 		}
 	}
@@ -259,13 +285,18 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 }
 
 // splitHunk cuts one oversized hunk into segments, each emitted as its own
-// piece: replicated metadata plus a synthesized @@ header whose starts are
-// offset by the lines consumed before the segment and whose counts match the
-// segment body exactly, so every piece passes hunk-count validation. A
-// no-newline marker always travels with the source line that owns it.
-func (b *chunkBuilder) splitHunk(meta lineSpan, metaText string, h lineSpan, emit func(string)) error {
-	metaTextLen, metaRawLen, metaCount := b.spanSizes(meta.start, meta.end)
+// piece body: a synthesized @@ header plus a slice of the original hunk
+// lines. Header starts continue the original ranges by the lines consumed
+// before the segment (a zero-count side names the line before the gap, per
+// unified-diff convention) and counts match the segment body exactly, so
+// every piece passes hunk-count validation. A no-newline marker always
+// travels with the source line that owns it.
+func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string)) error {
 	oldStart, newStart, heading := parseHunkHeaderForSplit(b.lines[h.start].text)
+	headerEOL := b.lines[h.start].eol
+	if headerEOL == "" {
+		headerEOL = "\n"
+	}
 	bodyStart, bodyEnd := h.start+1, h.end
 	oldOff, newOff := 0, 0
 
@@ -290,9 +321,10 @@ func (b *chunkBuilder) splitHunk(meta lineSpan, metaText string, h lineSpan, emi
 					un = 1
 				}
 			}
-			header := synthHunkHeader(oldStart+oldOff, segOld+uo, newStart+newOff, segNew+un, heading)
+			header := synthHunkHeader(oldStart, oldOff, segOld+uo, newStart, newOff, segNew+un, heading)
+			pt, pr, pc := prefixSizes()
 			t, r, c := b.spanSizes(segStart, unitEnd)
-			if !b.fits(metaTextLen+len(header)+t, metaRawLen+len(header)+1+r, metaCount+1+c) {
+			if !b.fits(pt+len(header)+t, pr+len(header)+len(headerEOL)+r, pc+1+c) {
 				break
 			}
 			segOld += uo
@@ -302,16 +334,33 @@ func (b *chunkBuilder) splitHunk(meta lineSpan, metaText string, h lineSpan, emi
 		if i == segStart {
 			return fmt.Errorf("cannot split the diff near line %d into a chunk under the size limit — try a narrower diff (per-file with `git diff -- <path> | meat`)", segStart+1)
 		}
-		header := synthHunkHeader(oldStart+oldOff, segOld, newStart+newOff, segNew, heading)
-		emit(metaText + header + "\n" + b.rangeText(segStart, i))
+		header := synthHunkHeader(oldStart, oldOff, segOld, newStart, newOff, segNew, heading)
+		emit(header + headerEOL + b.rangeText(segStart, i))
 		oldOff += segOld
 		newOff += segNew
 	}
 	return nil
 }
 
-func synthHunkHeader(oldStart, oldCount, newStart, newCount int, heading string) string {
-	return fmt.Sprintf("@@ -%d,%d +%d,%d @@%s", oldStart, oldCount, newStart, newCount, heading)
+// synthHunkHeader renders a segment's @@ header. A side's start continues the
+// original start by the rows already consumed; when the segment has no rows
+// on that side, unified-diff convention names the line before the gap (never
+// below 0, the empty-file position).
+func synthHunkHeader(oldStart, oldOff, oldCount, newStart, newOff, newCount int, heading string) string {
+	o := zeroAdjustedStart(oldStart, oldOff, oldCount)
+	n := zeroAdjustedStart(newStart, newOff, newCount)
+	return fmt.Sprintf("@@ -%d,%d +%d,%d @@%s", o, oldCount, n, newCount, heading)
+}
+
+func zeroAdjustedStart(start, off, count int) int {
+	pos := start + off
+	if count == 0 {
+		pos--
+		if pos < 0 {
+			pos = 0
+		}
+	}
+	return pos
 }
 
 // parseHunkHeaderForSplit extracts the range starts and trailing section
@@ -393,16 +442,26 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 		merged.OutputTokens += res.OutputTokens
 		if strings.TrimSpace(res.SmartDiff) != "" {
 			piece := res.SmartDiff
-			if chunk.continuation && emittedMeta[chunk.sectionID] {
-				piece = stripReplicatedMeta(piece, chunk.metaPrefix)
-			}
 			if chunk.sectionID >= 0 {
-				emittedMeta[chunk.sectionID] = true
+				// Dedupe a split file's replicated metadata, but only once the
+				// file header has actually surfaced in the output: a piece may
+				// legally elide its whole file section while retaining
+				// non-file preamble, and stripping the next piece's headers
+				// then would orphan its hunks.
+				if emittedMeta[chunk.sectionID] {
+					piece = stripReplicatedMeta(piece, chunk.metaPrefix)
+				} else if pieceContainsLine(piece, firstLineText(chunk.metaPrefix)) {
+					emittedMeta[chunk.sectionID] = true
+				}
 			}
-			if !strings.HasSuffix(piece, "\n") {
-				piece += "\n"
+			if piece != "" {
+				// Pieces join on line boundaries, but the last piece may keep
+				// a missing final newline from the original.
+				if len(parts) > 0 && !strings.HasSuffix(parts[len(parts)-1], "\n") {
+					parts[len(parts)-1] += "\n"
+				}
+				parts = append(parts, piece)
 			}
-			parts = append(parts, piece)
 		}
 		if s := strings.TrimSpace(res.Summary); s != "" && !seenSummary[s] {
 			seenSummary[s] = true
@@ -412,6 +471,24 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 	merged.SmartDiff = strings.Join(parts, "")
 	merged.Summary = strings.Join(summaries, " ")
 	return merged, nil
+}
+
+// firstLineText returns the text of s's first physical line.
+func firstLineText(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSuffix(s, "\r")
+}
+
+// pieceContainsLine reports whether any physical line of piece equals text.
+func pieceContainsLine(piece, text string) bool {
+	for _, l := range splitSourceLines(piece) {
+		if l.text == text {
+			return true
+		}
+	}
+	return false
 }
 
 // stripReplicatedMeta drops the leading lines of a continuation piece's
