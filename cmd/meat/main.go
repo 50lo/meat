@@ -24,8 +24,8 @@
 //	git show <sha> | meat
 //	git diff main...HEAD | meat
 //
-// It reads ANTHROPIC_API_KEY from the environment (optionally ANTHROPIC_BASE_URL
-// and MEAT_MODEL / -model).
+// It reads OPENAI_API_KEY or ANTHROPIC_API_KEY from the environment
+// (optionally the matching provider base URL, plus MEAT_MODEL / -model).
 package main
 
 import (
@@ -73,14 +73,16 @@ Flags:
   -h, --help      Show this help.
 
 Environment:
-  ANTHROPIC_API_KEY    API key for the built-in Anthropic backend.
-  ANTHROPIC_BASE_URL   Optional. Override the API base URL.
+  OPENAI_API_KEY       API key for OpenAI models (including the default).
+  OPENAI_BASE_URL      Optional. Override the OpenAI API base URL.
+  ANTHROPIC_API_KEY    API key for Claude models.
+  ANTHROPIC_BASE_URL   Optional. Override the Anthropic API base URL.
   MEAT_MODEL           Optional. Default model id.
   MEAT_CACHE           Optional. Cache directory (default ~/.meat; empty disables).
 
 On an exe.dev VM with an attached "llm" integration, meat uses the managed
-LLM gateway automatically — no API key needed. Set ANTHROPIC_API_KEY (or
-ANTHROPIC_BASE_URL) to override.
+LLM gateway automatically — no API key needed. Provider-specific API keys or
+base URLs override the gateway.
 `
 
 func main() {
@@ -121,10 +123,11 @@ func main() {
 	}
 
 	// compute produces a fresh result on a cache miss. It is a closure so run()
-	// can be unit-tested without an LLM: the real path constructs the Anthropic
-	// model (which needs credentials/network) only here, AFTER the cache check.
+	// can be unit-tested without an LLM: the real path constructs the selected
+	// provider model (which needs credentials/network) only here, AFTER the cache
+	// check.
 	compute := func(ctx context.Context) (*meat.Result, error) {
-		m, err := meat.NewAnthropicFromEnv(ctx, *model)
+		m, err := meat.NewModelFromEnv(ctx, *model)
 		if err != nil {
 			return nil, err
 		}

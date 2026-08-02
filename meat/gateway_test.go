@@ -126,3 +126,85 @@ func TestNewAnthropicFromEnv_NoCredentials(t *testing.T) {
 		t.Errorf("want error when no credentials and not on exe.dev")
 	}
 }
+
+func TestNewOpenAIFromEnv_PrefersExplicitKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-openai-explicit")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("MEAT_MODEL", "")
+	withMarker(t)
+	withReflection(t, `{"integrations":[{"name":"llm","type":"llm"}]}`)
+
+	m, err := NewOpenAIFromEnv(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.APIKey != "sk-openai-explicit" {
+		t.Errorf("APIKey = %q, want sk-openai-explicit", m.APIKey)
+	}
+	if m.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want empty (default api.openai.com)", m.BaseURL)
+	}
+	if m.Model != DefaultOpenAIModel {
+		t.Errorf("Model = %q, want %q", m.Model, DefaultOpenAIModel)
+	}
+	if m.ReasoningEffort != DefaultReasoningEffort {
+		t.Errorf("ReasoningEffort = %q, want %q", m.ReasoningEffort, DefaultReasoningEffort)
+	}
+}
+
+func TestNewModelFromEnv_DefaultsToOpenAIThroughGateway(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("MEAT_MODEL", "")
+	withMarker(t)
+	withReflection(t, `{"integrations":[{"name":"llm","type":"llm"}]}`)
+
+	model, err := NewModelFromEnv(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := model.(*OpenAIModel)
+	if !ok {
+		t.Fatalf("default backend = %T, want *OpenAIModel", model)
+	}
+	if m.Model != "gpt-5.6-sol" {
+		t.Errorf("Model = %q, want gpt-5.6-sol", m.Model)
+	}
+	if m.BaseURL != "https://llm.int.exe.xyz/openai" {
+		t.Errorf("BaseURL = %q, want gateway OpenAI prefix", m.BaseURL)
+	}
+	if m.ReasoningEffort != "medium" {
+		t.Errorf("ReasoningEffort = %q, want medium", m.ReasoningEffort)
+	}
+}
+
+func TestNewModelFromEnv_ClaudeUsesAnthropic(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-anthropic")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
+	model, err := NewModelFromEnv(context.Background(), "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := model.(*AnthropicModel)
+	if !ok {
+		t.Fatalf("Claude backend = %T, want *AnthropicModel", model)
+	}
+	if m.Model != "claude-sonnet-4-6" {
+		t.Errorf("Model = %q", m.Model)
+	}
+}
+
+func TestNewOpenAIFromEnv_NoCredentials(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	old := exeDevMarkerPath
+	exeDevMarkerPath = filepath.Join(t.TempDir(), "nope")
+	t.Cleanup(func() { exeDevMarkerPath = old })
+
+	if _, err := NewOpenAIFromEnv(context.Background(), ""); err == nil {
+		t.Errorf("want error when no credentials and not on exe.dev")
+	}
+}

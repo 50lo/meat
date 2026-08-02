@@ -23,7 +23,7 @@ func TestRubric_ImportsAlwaysHidden(t *testing.T) {
 		t.Skip("set MEAT_E2E=1 to run the live-LLM rubric test")
 	}
 	ctx := context.Background()
-	m, err := NewAnthropicFromEnv(ctx, "")
+	m, err := NewModelFromEnv(ctx, "")
 	if err != nil {
 		t.Skipf("no LLM available: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestRubric_PythonGoldenCommits(t *testing.T) {
 		t.Skip("set MEAT_E2E=1 to run the live-LLM rubric test")
 	}
 	ctx := context.Background()
-	m, err := NewAnthropicFromEnv(ctx, "")
+	m, err := NewModelFromEnv(ctx, "")
 	if err != nil {
 		t.Skipf("no LLM available: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestRubric_NoSemicolonPacking(t *testing.T) {
 		t.Skip("set MEAT_E2E=1 to run the live-LLM rubric test")
 	}
 	ctx := context.Background()
-	m, err := NewAnthropicFromEnv(ctx, "")
+	m, err := NewModelFromEnv(ctx, "")
 	if err != nil {
 		t.Skipf("no LLM available: %v", err)
 	}

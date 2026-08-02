@@ -16,8 +16,8 @@
 // load-bearing.
 //
 // The package is provider-agnostic: callers supply a Model. The command
-// meat.dev ships a built-in Anthropic Model; embedders such as Shelley adapt
-// their own LLM client.
+// meat.dev ships built-in OpenAI Responses and Anthropic Messages models;
+// embedders such as Shelley can still adapt their own LLM client.
 package meat
 
 import (

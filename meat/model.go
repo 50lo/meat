@@ -15,9 +15,10 @@ const (
 
 // Block is one piece of message content. Its meaningful fields depend on Type:
 //
-//	"text"        -> Text
-//	"tool_use"    -> ID, ToolName, ToolInput
-//	"tool_result" -> ToolUseID, ToolResult, ToolError
+//	"text"           -> Text
+//	"tool_use"       -> ID, ToolName, ToolInput
+//	"tool_result"    -> ToolUseID, ToolResult, ToolError
+//	"provider_state" -> Provider, ProviderData
 //
 // It is deliberately a flat struct (rather than an interface) so the small set
 // of Model implementations can translate to/from it without type switches.
@@ -36,6 +37,13 @@ type Block struct {
 	ToolUseID  string
 	ToolResult string
 	ToolError  bool
+
+	// Opaque provider response state that must be replayed exactly on a later
+	// turn. OpenAI reasoning models use this for encrypted reasoning items and
+	// other Responses API output items. Generic agent code may inspect the
+	// normalized fields above, but must leave ProviderData untouched.
+	Provider     string
+	ProviderData json.RawMessage
 }
 
 // Message is a single turn in the conversation.
@@ -60,7 +68,7 @@ type Response struct {
 }
 
 // Model is the minimal LLM interface meat needs. It is provider-agnostic: the
-// CLI uses the built-in Anthropic implementation (anthropic.go), while embedders
+// CLI uses the built-in OpenAI or Anthropic implementation, while embedders
 // such as Shelley supply their own by adapting an existing LLM client.
 //
 // Generate sends the system prompt, the conversation so far, and the available

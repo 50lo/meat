@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// DefaultAnthropicModel is the model used when AnthropicModel.Model is empty.
+// DefaultAnthropicModel is used when AnthropicModel.Model is empty or the
+// provider-specific constructor receives no model selection.
 const DefaultAnthropicModel = "claude-opus-4-8"
 
 // AnthropicModel is a built-in Model backed by the Anthropic Messages API. It
@@ -22,20 +23,6 @@ type AnthropicModel struct {
 	Model   string       // defaults to DefaultAnthropicModel
 	BaseURL string       // bare origin/prefix; defaults to https://api.anthropic.com. "/v1/messages" is appended.
 	HTTPC   *http.Client // defaults to a client with a 2m timeout
-}
-
-// ResolveModel applies the model-id fallback chain used by NewAnthropicFromEnv:
-// the explicit value, then $MEAT_MODEL, then DefaultAnthropicModel. It performs
-// no network or credential work, so callers (e.g. a cache key) can resolve the
-// effective model id cheaply and offline.
-func ResolveModel(model string) string {
-	if model == "" {
-		model = os.Getenv("MEAT_MODEL")
-	}
-	if model == "" {
-		model = DefaultAnthropicModel
-	}
-	return model
 }
 
 // maxOutputTokens is the per-turn output cap sent to the API. Large enough for
@@ -59,7 +46,7 @@ const implicitGatewayKey = "implicit"
 //
 // model falls back to $MEAT_MODEL, then DefaultAnthropicModel.
 func NewAnthropicFromEnv(ctx context.Context, model string) (*AnthropicModel, error) {
-	model = ResolveModel(model)
+	model = resolveModel(model, DefaultAnthropicModel)
 
 	key := os.Getenv("ANTHROPIC_API_KEY")
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
@@ -194,6 +181,16 @@ var retryBaseDelay = time.Second
 // the raw response body on the first 200. Non-retryable statuses (4xx other
 // than 408/429) fail immediately — retrying a bad request can't help.
 func postWithRetry(ctx context.Context, client *http.Client, url, apiKey string, body []byte) ([]byte, error) {
+	return postJSONWithRetry(ctx, client, url, body, "anthropic", func(req *http.Request) {
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	})
+}
+
+// postJSONWithRetry POSTs one JSON request, retrying transient failures (429
+// rate limits, 5xx, and transport errors) with exponential backoff. Successful
+// streaming responses are read to completion and returned as raw bytes.
+func postJSONWithRetry(ctx context.Context, client *http.Client, url string, body []byte, provider string, setHeaders func(*http.Request)) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -211,8 +208,9 @@ func postWithRetry(ctx context.Context, client *http.Client, url, apiKey string,
 			return nil, err
 		}
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-api-key", apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
+		if setHeaders != nil {
+			setHeaders(req)
+		}
 
 		httpResp, err := client.Do(req)
 		if err != nil {
@@ -231,7 +229,7 @@ func postWithRetry(ctx context.Context, client *http.Client, url, apiKey string,
 		if httpResp.StatusCode == http.StatusOK {
 			return raw, nil
 		}
-		lastErr = fmt.Errorf("anthropic API %d: %s", httpResp.StatusCode, strings.TrimSpace(string(raw)))
+		lastErr = fmt.Errorf("%s API %d: %s", provider, httpResp.StatusCode, strings.TrimSpace(string(raw)))
 		if !retryableStatus(httpResp.StatusCode) {
 			return nil, lastErr
 		}

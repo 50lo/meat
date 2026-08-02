@@ -81,9 +81,15 @@ go run meat.dev/cmd/meat -h
 ```
 
 On an **exe.dev VM** with an attached `llm` integration, `meat` uses the managed
-LLM gateway automatically — no API key needed. Otherwise it requires
-`ANTHROPIC_API_KEY`. Optional: `ANTHROPIC_BASE_URL`, `MEAT_MODEL` (or `-model`).
-The default model is Claude Opus 4.8.
+LLM gateway automatically — no API key needed. Otherwise, OpenAI models use
+`OPENAI_API_KEY` (optional `OPENAI_BASE_URL`) and Claude models use
+`ANTHROPIC_API_KEY` (optional `ANTHROPIC_BASE_URL`). Select a model with
+`MEAT_MODEL` or `-model`.
+
+The default is `gpt-5.6-sol`. OpenAI requests use the Responses API with medium
+reasoning effort, stateless encrypted-reasoning replay across tool turns, and
+streaming transport. Embedders constructing `OpenAIModel` directly can override
+`ReasoningEffort`.
 
 Results are cached under `~/.meat`, keyed by the SHA-256 of the model, the
 rubric/compiler-protocol version, and the diff contents. Re-running on an
@@ -110,12 +116,13 @@ token usage and elapsed time to stderr.
 
 - `meat.dev/cmd/meat` — `package main`, the CLI. Stdlib only.
 - `meat.dev/meat` — the reusable guts: the agent loop (`Abridge`), the rubric,
-  the read-only tools, and a provider-agnostic `Model` interface plus a built-in
-  stdlib `AnthropicModel`.
+  the read-only tools, and a provider-agnostic `Model` interface plus built-in
+  stdlib `OpenAIModel` and `AnthropicModel` implementations.
 
-The `Model` interface keeps the package embeddable: the CLI uses the built-in
-Anthropic backend, while other programs (e.g. Shelley) supply their own `Model`
-by adapting an existing LLM client — no shared LLM dependency required.
+The `Model` interface keeps the package embeddable: the CLI selects OpenAI
+Responses for non-Claude model IDs and Anthropic Messages for `claude-*`, while
+other programs (e.g. Shelley) can supply their own `Model` by adapting an
+existing LLM client — no shared LLM dependency required.
 
 ## Tuning
 
