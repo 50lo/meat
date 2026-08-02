@@ -222,6 +222,33 @@ func TestSplitDiff_SynthesizedHeadersUseGapConvention(t *testing.T) {
 	}
 }
 
+// TestSplitDiff_OriginallyEmptySideKeepsItsStart: a side whose ORIGINAL range
+// is zero-count (pure insertion/deletion hunks) already names the line before
+// the gap; splitting must not decrement it again.
+func TestSplitDiff_OriginallyEmptySideKeepsItsStart(t *testing.T) {
+	meta := "diff --git a/a b/a\n--- a/a\n+++ b/a\n"
+	diff := meta + "@@ -10,0 +11,4 @@\n+r0\n+r1\n+r2\n+r3\n"
+	budget := len(numberedDiff(meta + "@@ -10,0 +11,2 @@\n+r0\n+r1\n"))
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireValidChunks(t, chunks, budget)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want a real split", len(chunks))
+	}
+	wantNew := 11
+	for i, c := range chunks {
+		if !strings.Contains(c.text, "@@ -10,0 ") {
+			t.Errorf("chunk %d shifted the originally empty old side, want -10,0:\n%s", i, c.text)
+		}
+		if !strings.Contains(c.text, fmt.Sprintf("+%d,", wantNew)) {
+			t.Errorf("chunk %d new start: want +%d:\n%s", i, wantNew, c.text)
+		}
+		wantNew += strings.Count(c.text, "\n+r")
+	}
+}
+
 // TestSplitDiff_ZeroStartClampsAtZero: splitting a new-file hunk (old side
 // @@ -0,0) must not synthesize a negative old start.
 func TestSplitDiff_ZeroStartClampsAtZero(t *testing.T) {
@@ -237,6 +264,72 @@ func TestSplitDiff_ZeroStartClampsAtZero(t *testing.T) {
 		if !strings.Contains(c.text, "@@ -0,0 ") {
 			t.Errorf("chunk %d old side = should stay -0,0:\n%s", i, c.text)
 		}
+	}
+}
+
+// TestSplitDiff_KeepsMultilineImportBlockAtomic: a mid-hunk cut must never
+// land inside a multiline import block. Each chunk's compiler runs its own
+// mandatory import pass, which recognizes a block only from its opener; a
+// severed tail would surface import members in the merged reading diff.
+func TestSplitDiff_KeepsMultilineImportBlockAtomic(t *testing.T) {
+	meta := "diff --git a/a.go b/a.go\n--- /dev/null\n+++ b/a.go\n"
+	// Rows before the import block position the greedy cut inside the block;
+	// atomicity must push the whole block into the next chunk instead.
+	const before, members, after = 10, 8, 10
+	var body strings.Builder
+	fmt.Fprintf(&body, "@@ -0,0 +1,%d @@\n+package a\n+\n", 5+before+members+after)
+	for i := 0; i < before; i++ {
+		fmt.Fprintf(&body, "+var a%d = %d\n", i, i)
+	}
+	body.WriteString("+import (\n")
+	for i := 0; i < members; i++ {
+		fmt.Fprintf(&body, "+\t%q\n", fmt.Sprintf("pkg%d", i))
+	}
+	body.WriteString("+)\n+func F() {}\n")
+	for i := 0; i < after; i++ {
+		fmt.Fprintf(&body, "+var b%d = %d\n", i, i)
+	}
+	diff := meta + body.String()
+	// Budget sized so a per-line greedy cut would land mid-block: everything
+	// up to the block plus half its members.
+	prefix := strings.SplitAfter(diff, `"pkg3"`+"\n")[0]
+	budget := len(numberedDiff(prefix))
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireValidChunks(t, chunks, budget)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want a real split", len(chunks))
+	}
+	sawBlock := false
+	for i, c := range chunks {
+		if !strings.Contains(c.text, `"pkg`) {
+			continue
+		}
+		sawBlock = true
+		if !strings.Contains(c.text, "import (") || !strings.Contains(c.text, `"pkg7"`) {
+			t.Errorf("chunk %d severed the multiline import block:\n%s", i, c.text)
+		}
+	}
+	if !sawBlock {
+		t.Fatal("fixture lost its import block")
+	}
+
+	// End to end: the merged reading diff must contain no import scaffolding.
+	defer setSingleRunBudget(t, budget)()
+	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds file.",
+	}))}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.SmartDiff, `"pkg`) || strings.Contains(res.SmartDiff, "+)") || strings.Contains(res.SmartDiff, "import (") {
+		t.Errorf("import scaffolding leaked into the merged reading diff:\n%s", res.SmartDiff)
+	}
+	if !strings.Contains(res.SmartDiff, "+func F() {}") {
+		t.Errorf("behavioral row lost from merged reading diff:\n%s", res.SmartDiff)
 	}
 }
 

@@ -91,7 +91,12 @@ type chunkBuilder struct {
 	// line endings, so any span's single-run size is O(1) to check.
 	prefixText []int
 	prefixRaw  []int
-	chunks     []diffChunk
+	// hidden marks lines the mandatory import pass removes. Mid-hunk cuts
+	// treat a contiguous hidden run as atomic, so a multiline import block is
+	// never severed from its opener: each chunk's own import pass must see
+	// whole blocks to hide them.
+	hidden []bool
+	chunks []diffChunk
 }
 
 // splitDiffForAbridging cuts raw into chunks that each fit budget both as raw
@@ -109,6 +114,7 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 		budget:     budget,
 		prefixText: make([]int, len(lines)+1),
 		prefixRaw:  make([]int, len(lines)+1),
+		hidden:     mandatoryRemovalMask(len(lines), mandatoryImportRemovalPlan(lines, layout)),
 	}
 	for i, l := range lines {
 		b.prefixText[i+1] = b.prefixText[i] + len(l.text)
@@ -289,10 +295,13 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 // lines. Header starts continue the original ranges by the lines consumed
 // before the segment (a zero-count side names the line before the gap, per
 // unified-diff convention) and counts match the segment body exactly, so
-// every piece passes hunk-count validation. A no-newline marker always
-// travels with the source line that owns it.
+// every piece passes hunk-count validation. Cut points respect two atomic
+// units: a no-newline marker travels with the source line that owns it, and
+// a contiguous run of lines hidden by the mandatory import pass stays whole,
+// so a segment never starts inside a multiline import block its own import
+// pass could not recognize.
 func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string)) error {
-	oldStart, newStart, heading := parseHunkHeaderForSplit(b.lines[h.start].text)
+	oldStart, oldZero, newStart, newZero, heading := parseHunkHeaderForSplit(b.lines[h.start].text)
 	headerEOL := b.lines[h.start].eol
 	if headerEOL == "" {
 		headerEOL = "\n"
@@ -300,41 +309,61 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 	bodyStart, bodyEnd := h.start+1, h.end
 	oldOff, newOff := 0, 0
 
+	// unitEnd returns the end of the atomic unit starting at line i.
+	unitEnd := func(i int) int {
+		j := i + 1
+		for j < bodyEnd && b.layout.kinds[j] == diffLineNoNewline {
+			j++
+		}
+		if b.hidden[i] {
+			for j < bodyEnd && b.hidden[j] {
+				j++
+				for j < bodyEnd && b.layout.kinds[j] == diffLineNoNewline {
+					j++
+				}
+			}
+		}
+		return j
+	}
+	unitRows := func(start, end int) (uo, un int) {
+		for i := start; i < end; i++ {
+			if !isHunkSource(b.layout.kinds[i]) || len(b.lines[i].text) == 0 {
+				continue
+			}
+			switch b.lines[i].text[0] {
+			case ' ':
+				uo++
+				un++
+			case '-':
+				uo++
+			case '+':
+				un++
+			}
+		}
+		return uo, un
+	}
+
 	i := bodyStart
 	for i < bodyEnd {
 		segStart := i
 		segOld, segNew := 0, 0
 		for i < bodyEnd {
-			// A unit is one body line plus any no-newline marker bound to it.
-			unitEnd := i + 1
-			for unitEnd < bodyEnd && b.layout.kinds[unitEnd] == diffLineNoNewline {
-				unitEnd++
-			}
-			uo, un := 0, 0
-			if isHunkSource(b.layout.kinds[i]) && len(b.lines[i].text) > 0 {
-				switch b.lines[i].text[0] {
-				case ' ':
-					uo, un = 1, 1
-				case '-':
-					uo = 1
-				case '+':
-					un = 1
-				}
-			}
-			header := synthHunkHeader(oldStart, oldOff, segOld+uo, newStart, newOff, segNew+un, heading)
+			next := unitEnd(i)
+			uo, un := unitRows(i, next)
+			header := synthHunkHeader(oldStart, oldOff, segOld+uo, oldZero, newStart, newOff, segNew+un, newZero, heading)
 			pt, pr, pc := prefixSizes()
-			t, r, c := b.spanSizes(segStart, unitEnd)
+			t, r, c := b.spanSizes(segStart, next)
 			if !b.fits(pt+len(header)+t, pr+len(header)+len(headerEOL)+r, pc+1+c) {
 				break
 			}
 			segOld += uo
 			segNew += un
-			i = unitEnd
+			i = next
 		}
 		if i == segStart {
 			return fmt.Errorf("cannot split the diff near line %d into a chunk under the size limit — try a narrower diff (per-file with `git diff -- <path> | meat`)", segStart+1)
 		}
-		header := synthHunkHeader(oldStart, oldOff, segOld, newStart, newOff, segNew, heading)
+		header := synthHunkHeader(oldStart, oldOff, segOld, oldZero, newStart, newOff, segNew, newZero, heading)
 		emit(header + headerEOL + b.rangeText(segStart, i))
 		oldOff += segOld
 		newOff += segNew
@@ -344,17 +373,17 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 
 // synthHunkHeader renders a segment's @@ header. A side's start continues the
 // original start by the rows already consumed; when the segment has no rows
-// on that side, unified-diff convention names the line before the gap (never
-// below 0, the empty-file position).
-func synthHunkHeader(oldStart, oldOff, oldCount, newStart, newOff, newCount int, heading string) string {
-	o := zeroAdjustedStart(oldStart, oldOff, oldCount)
-	n := zeroAdjustedStart(newStart, newOff, newCount)
+// on a side whose original range was nonempty, unified-diff convention names
+// the line before the gap (an originally empty side already does).
+func synthHunkHeader(oldStart, oldOff, oldCount int, oldZero bool, newStart, newOff, newCount int, newZero bool, heading string) string {
+	o := gapAdjustedStart(oldStart, oldOff, oldCount, oldZero)
+	n := gapAdjustedStart(newStart, newOff, newCount, newZero)
 	return fmt.Sprintf("@@ -%d,%d +%d,%d @@%s", o, oldCount, n, newCount, heading)
 }
 
-func zeroAdjustedStart(start, off, count int) int {
+func gapAdjustedStart(start, off, count int, originallyZero bool) int {
 	pos := start + off
-	if count == 0 {
+	if count == 0 && !originallyZero {
 		pos--
 		if pos < 0 {
 			pos = 0
@@ -363,11 +392,12 @@ func zeroAdjustedStart(start, off, count int) int {
 	return pos
 }
 
-// parseHunkHeaderForSplit extracts the range starts and trailing section
-// heading from an @@ header. An unparseable header (e.g. a bare @@) yields
-// starts of 1 and no heading; only reachable for hunks so large they must be
-// split, where approximate starts still beat refusing the diff.
-func parseHunkHeaderForSplit(text string) (oldStart, newStart int, heading string) {
+// parseHunkHeaderForSplit extracts the range starts, whether each side's
+// original count is zero, and the trailing section heading from an @@ header.
+// An unparseable header (e.g. a bare @@) yields starts of 1 and no heading;
+// only reachable for hunks so large they must be split, where approximate
+// starts still beat refusing the diff.
+func parseHunkHeaderForSplit(text string) (oldStart int, oldZero bool, newStart int, newZero bool, heading string) {
 	oldStart, newStart = 1, 1
 	rest, ok := strings.CutPrefix(text, "@@ ")
 	if !ok {
@@ -382,28 +412,29 @@ func parseHunkHeaderForSplit(text string) (oldStart, newStart int, heading strin
 	if len(fields) != 2 {
 		return
 	}
-	if v, ok := parseHunkStart(fields[0], '-'); ok {
-		oldStart = v
+	if v, zero, ok := parseHunkStart(fields[0], '-'); ok {
+		oldStart, oldZero = v, zero
 	}
-	if v, ok := parseHunkStart(fields[1], '+'); ok {
-		newStart = v
+	if v, zero, ok := parseHunkStart(fields[1], '+'); ok {
+		newStart, newZero = v, zero
 	}
 	return
 }
 
-func parseHunkStart(field string, sign byte) (int, bool) {
+func parseHunkStart(field string, sign byte) (start int, zeroCount, ok bool) {
 	if len(field) < 2 || field[0] != sign {
-		return 0, false
+		return 0, false, false
 	}
 	s := field[1:]
 	if comma := strings.IndexByte(s, ','); comma >= 0 {
+		zeroCount = s[comma+1:] == "0"
 		s = s[:comma]
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil || v < 0 {
-		return 0, false
+		return 0, false, false
 	}
-	return v, true
+	return v, zeroCount, true
 }
 
 // abridgeChunked splits an oversized diff, runs the normal agent loop on each
