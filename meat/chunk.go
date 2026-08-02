@@ -291,15 +291,25 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 }
 
 // splitHunk cuts one oversized hunk into segments, each emitted as its own
-// piece body: a synthesized @@ header plus a slice of the original hunk
-// lines. Header starts continue the original ranges by the lines consumed
-// before the segment (a zero-count side names the line before the gap, per
-// unified-diff convention) and counts match the segment body exactly, so
-// every piece passes hunk-count validation. Cut points respect two atomic
-// units: a no-newline marker travels with the source line that owns it, and
-// a contiguous run of lines hidden by the mandatory import pass stays whole,
-// so a segment never starts inside a multiline import block its own import
-// pass could not recognize.
+// piece body: a synthesized @@ header plus the segment's hunk lines. Header
+// starts continue the original ranges by the rows consumed before the segment
+// (a zero-count side names the line before the gap, per unified-diff
+// convention) and counts match the emitted body exactly, so every piece
+// passes hunk-count validation. A no-newline marker always travels with the
+// source line that owns it.
+//
+// Segments pre-apply the whole-diff mandatory import mask: rows the import
+// pass hides are dropped from the emitted text (with header counts and start
+// offsets accounting for them). A segment's own compiler cannot re-derive
+// those removals — a cut can sever an import block or embedded-string opener
+// from the rows that identify it — and dropped rows could never appear in a
+// result anyway. For the same reason the original hunk heading is carried
+// only by a segment that starts at the true top of the hunk body: replicated
+// onto later segments, a heading like a function or import opener would
+// describe context the segment does not actually start inside. Segments left
+// with no changed rows (context only, or import-only after the drop) are not
+// emitted; the whole-diff compiler would never retain them against an empty
+// plan either.
 func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string)) error {
 	oldStart, oldZero, newStart, newZero, heading := parseHunkHeaderForSplit(b.lines[h.start].text)
 	headerEOL := b.lines[h.start].eol
@@ -307,21 +317,13 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		headerEOL = "\n"
 	}
 	bodyStart, bodyEnd := h.start+1, h.end
-	oldOff, newOff := 0, 0
 
-	// unitEnd returns the end of the atomic unit starting at line i.
+	// unitEnd returns the end of the atomic unit starting at line i: the line
+	// plus any no-newline markers bound to it.
 	unitEnd := func(i int) int {
 		j := i + 1
 		for j < bodyEnd && b.layout.kinds[j] == diffLineNoNewline {
 			j++
-		}
-		if b.hidden[i] {
-			for j < bodyEnd && b.hidden[j] {
-				j++
-				for j < bodyEnd && b.layout.kinds[j] == diffLineNoNewline {
-					j++
-				}
-			}
 		}
 		return j
 	}
@@ -343,53 +345,101 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		return uo, un
 	}
 
+	oldOff, newOff := 0, 0
+	atBodyStart := true
 	i := bodyStart
 	for i < bodyEnd {
-		segStart := i
-		segOld, segNew := 0, 0
-		for i < bodyEnd {
+		if b.hidden[i] {
 			next := unitEnd(i)
 			uo, un := unitRows(i, next)
-			header := synthHunkHeader(oldStart, oldOff, segOld+uo, oldZero, newStart, newOff, segNew+un, newZero, heading)
+			oldOff += uo
+			newOff += un
+			i = next
+			atBodyStart = false
+			continue
+		}
+
+		segHeading := ""
+		if atBodyStart {
+			segHeading = heading
+		}
+		segOldStart, segNewStart := oldStart+oldOff, newStart+newOff
+		segOld, segNew := 0, 0
+		segTextLen, segRawLen, segCount := 0, 0, 0
+		var spans []lineSpan
+		hasChange := false
+		for i < bodyEnd {
+			if b.hidden[i] {
+				// Dropped inside the segment: advances original coordinates
+				// but contributes no text, rows, or budget.
+				next := unitEnd(i)
+				uo, un := unitRows(i, next)
+				oldOff += uo
+				newOff += un
+				i = next
+				continue
+			}
+			next := unitEnd(i)
+			uo, un := unitRows(i, next)
+			header := synthHunkHeader(segOldStart, segOld+uo, oldZero, segNewStart, segNew+un, newZero, segHeading)
 			pt, pr, pc := prefixSizes()
-			t, r, c := b.spanSizes(segStart, next)
-			if !b.fits(pt+len(header)+t, pr+len(header)+len(headerEOL)+r, pc+1+c) {
+			t, r, c := b.spanSizes(i, next)
+			if !b.fits(pt+len(header)+segTextLen+t, pr+len(header)+len(headerEOL)+segRawLen+r, pc+1+segCount+c) {
 				break
+			}
+			if b.layout.kinds[i] == diffLineHunkChange {
+				hasChange = true
 			}
 			segOld += uo
 			segNew += un
+			segTextLen += t
+			segRawLen += r
+			segCount += c
+			oldOff += uo
+			newOff += un
+			if n := len(spans); n > 0 && spans[n-1].end == i {
+				spans[n-1].end = next
+			} else {
+				spans = append(spans, lineSpan{start: i, end: next})
+			}
 			i = next
 		}
-		if i == segStart {
-			return fmt.Errorf("cannot split the diff near line %d into a chunk under the size limit — try a narrower diff (per-file with `git diff -- <path> | meat`)", segStart+1)
+		atBodyStart = false
+		if segCount == 0 {
+			return fmt.Errorf("cannot split the diff near line %d into a chunk under the size limit — try a narrower diff (per-file with `git diff -- <path> | meat`)", i+1)
 		}
-		header := synthHunkHeader(oldStart, oldOff, segOld, oldZero, newStart, newOff, segNew, newZero, heading)
-		emit(header + headerEOL + b.rangeText(segStart, i))
-		oldOff += segOld
-		newOff += segNew
+		if !hasChange {
+			continue
+		}
+		var sb strings.Builder
+		sb.WriteString(synthHunkHeader(segOldStart, segOld, oldZero, segNewStart, segNew, newZero, segHeading))
+		sb.WriteString(headerEOL)
+		for _, sp := range spans {
+			sb.WriteString(b.rangeText(sp.start, sp.end))
+		}
+		emit(sb.String())
 	}
 	return nil
 }
 
-// synthHunkHeader renders a segment's @@ header. A side's start continues the
-// original start by the rows already consumed; when the segment has no rows
-// on a side whose original range was nonempty, unified-diff convention names
-// the line before the gap (an originally empty side already does).
-func synthHunkHeader(oldStart, oldOff, oldCount int, oldZero bool, newStart, newOff, newCount int, newZero bool, heading string) string {
-	o := gapAdjustedStart(oldStart, oldOff, oldCount, oldZero)
-	n := gapAdjustedStart(newStart, newOff, newCount, newZero)
+// synthHunkHeader renders a segment's @@ header from its side starts and
+// emitted-row counts. When the segment has no rows on a side whose original
+// range was nonempty, unified-diff convention names the line before the gap
+// (an originally empty side already does).
+func synthHunkHeader(oldStart, oldCount int, oldZero bool, newStart, newCount int, newZero bool, heading string) string {
+	o := gapAdjustedStart(oldStart, oldCount, oldZero)
+	n := gapAdjustedStart(newStart, newCount, newZero)
 	return fmt.Sprintf("@@ -%d,%d +%d,%d @@%s", o, oldCount, n, newCount, heading)
 }
 
-func gapAdjustedStart(start, off, count int, originallyZero bool) int {
-	pos := start + off
+func gapAdjustedStart(start, count int, originallyZero bool) int {
 	if count == 0 && !originallyZero {
-		pos--
-		if pos < 0 {
-			pos = 0
+		start--
+		if start < 0 {
+			start = 0
 		}
 	}
-	return pos
+	return start
 }
 
 // parseHunkHeaderForSplit extracts the range starts, whether each side's
@@ -437,6 +487,22 @@ func parseHunkStart(field string, sign byte) (start int, zeroCount, ok bool) {
 	return v, zeroCount, true
 }
 
+// chunkError names the chunk whose agent run failed while preserving the
+// wrapped error chain, so errors.Is/As (cancellation, deadline, typed model
+// errors) behave the same for chunked and single-run diffs.
+type chunkError struct {
+	label string
+	err   error
+}
+
+func (e *chunkError) Error() string {
+	// abridgeOne errors already carry the "meat:" prefix; splice the chunk
+	// label in rather than stacking prefixes.
+	return "meat: " + e.label + ": " + strings.TrimPrefix(e.err.Error(), "meat: ")
+}
+
+func (e *chunkError) Unwrap() error { return e.err }
+
 // abridgeChunked splits an oversized diff, runs the normal agent loop on each
 // chunk, and merges the results: reading diffs are concatenated in original
 // order (dropping a continuation piece's replicated metadata once its file
@@ -465,9 +531,7 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 		sub.Progress = func(msg string) { progress(label + ": " + msg) }
 		res, err := abridgeOne(ctx, model, sub)
 		if err != nil {
-			// abridgeOne errors already carry the "meat:" prefix; splice the
-			// chunk label in rather than stacking prefixes.
-			return nil, fmt.Errorf("meat: %s: %s", label, strings.TrimPrefix(err.Error(), "meat: "))
+			return nil, &chunkError{label: label, err: err}
 		}
 		merged.InputTokens += res.InputTokens
 		merged.OutputTokens += res.OutputTokens

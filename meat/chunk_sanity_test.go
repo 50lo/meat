@@ -9,9 +9,11 @@ import (
 // TestSplitDiff_RealWorldSanity is an opt-in check against an arbitrary
 // real-world diff supplied via CHUNK_SANITY_DIFF: at the production budget
 // and at several shrunken budgets, every chunk must fit, validate
-// independently, and jointly preserve every hunk source row in order. A
-// budget below the diff's longest physical line is skipped: single lines are
-// never split, so such budgets legitimately refuse.
+// independently, and jointly preserve every changed row the whole-diff
+// compiler would keep (the splitter itself drops rows the mandatory import
+// pass hides, and change-free segments). A budget below the diff's longest
+// physical line is skipped: single lines are never split, so such budgets
+// legitimately refuse.
 func TestSplitDiff_RealWorldSanity(t *testing.T) {
 	path := os.Getenv("CHUNK_SANITY_DIFF")
 	if path == "" {
@@ -31,7 +33,7 @@ func TestSplitDiff_RealWorldSanity(t *testing.T) {
 			longest = len(l.text)
 		}
 	}
-	wantRows := strings.Join(chunkBodyRows(raw), "\n")
+	wantRows := strings.Join(retainedChangedRows(raw), "\n")
 	for _, budget := range []int{maxDiffBytes, 200 << 10, 64 << 10, 16 << 10} {
 		if budget < longest*2 {
 			t.Logf("budget %dKB skipped: longest line is %d bytes", budget>>10, longest)
@@ -49,11 +51,26 @@ func TestSplitDiff_RealWorldSanity(t *testing.T) {
 			if err := validateSupportedDiff(c.text); err != nil {
 				t.Errorf("budget %d chunk %d invalid: %v", budget, i, err)
 			}
-			rows = append(rows, chunkBodyRows(c.text)...)
+			rows = append(rows, retainedChangedRows(c.text)...)
 		}
 		if strings.Join(rows, "\n") != wantRows {
-			t.Errorf("budget %d: chunking lost or reordered hunk rows", budget)
+			t.Errorf("budget %d: chunking lost or reordered changed rows", budget)
 		}
 		t.Logf("raw %dKB, budget %dKB -> %d chunks", len(raw)>>10, budget>>10, len(chunks))
 	}
+}
+
+// retainedChangedRows lists the changed rows of a diff that survive the
+// mandatory import pass, in order — the rows any edit plan could retain.
+func retainedChangedRows(text string) []string {
+	lines := splitSourceLines(text)
+	layout := analyzeDiff(lines)
+	hidden := mandatoryRemovalMask(len(lines), mandatoryImportRemovalPlan(lines, layout))
+	var rows []string
+	for i, l := range lines {
+		if layout.kinds[i] == diffLineHunkChange && !hidden[i] {
+			rows = append(rows, l.text)
+		}
+	}
+	return rows
 }

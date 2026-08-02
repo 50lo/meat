@@ -2,6 +2,7 @@ package meat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,6 +15,13 @@ func setSingleRunBudget(t *testing.T, budget int) func() {
 	old := singleRunDiffBytes
 	singleRunDiffBytes = budget
 	return func() { singleRunDiffBytes = old }
+}
+
+// modelFunc adapts a func to the Model interface for error-path tests.
+type modelFunc func(ctx context.Context) (*Response, error)
+
+func (f modelFunc) Generate(ctx context.Context, _ string, _ []Message, _ []Tool) (*Response, error) {
+	return f(ctx)
 }
 
 // fileSection builds one file section with a single hunk of n added rows.
@@ -141,20 +149,37 @@ func TestSplitDiff_SplitsOversizedHunkWithConsistentCounts(t *testing.T) {
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %d, want a real split", len(chunks))
 	}
+	// Every changed row survives, in order. (A change-free trailing segment
+	// may drop context rows; no plan could retain a change-free hunk anyway.)
 	var rows []string
 	for _, c := range chunks {
-		rows = append(rows, chunkBodyRows(c.text)...)
+		for _, r := range chunkBodyRows(c.text) {
+			if strings.HasPrefix(r, "+") || strings.HasPrefix(r, "-") {
+				rows = append(rows, r)
+			}
+		}
 	}
-	if want := chunkBodyRows(diff); strings.Join(rows, "\n") != strings.Join(want, "\n") {
-		t.Errorf("hunk split lost or reordered rows")
+	var want []string
+	for _, r := range chunkBodyRows(diff) {
+		if strings.HasPrefix(r, "+") || strings.HasPrefix(r, "-") {
+			want = append(want, r)
+		}
 	}
-	// Synthesized headers continue the original starts and keep the heading.
+	if strings.Join(rows, "\n") != strings.Join(want, "\n") {
+		t.Errorf("hunk split lost or reordered changed rows:\ngot:\n%s\nwant:\n%s", strings.Join(rows, "\n"), strings.Join(want, "\n"))
+	}
+	// The first segment continues the original starts and keeps the heading;
+	// later segments never replicate it (a heading such as an enclosing
+	// definition or import opener describes context they do not start inside).
 	if !strings.Contains(chunks[0].text, "@@ -100,") || !strings.Contains(chunks[0].text, "+200,") {
 		t.Errorf("first segment header should keep original starts:\n%s", chunks[0].text)
 	}
-	for i, c := range chunks {
-		if !strings.Contains(c.text, " @@ func big()") {
-			t.Errorf("chunk %d lost the hunk heading:\n%s", i, c.text)
+	if !strings.Contains(chunks[0].text, " @@ func big()") {
+		t.Errorf("first segment lost the hunk heading:\n%s", chunks[0].text)
+	}
+	for i, c := range chunks[1:] {
+		if strings.Contains(c.text, "func big()") {
+			t.Errorf("chunk %d replicated the hunk heading it does not start inside:\n%s", i+1, c.text)
 		}
 	}
 }
@@ -267,14 +292,15 @@ func TestSplitDiff_ZeroStartClampsAtZero(t *testing.T) {
 	}
 }
 
-// TestSplitDiff_KeepsMultilineImportBlockAtomic: a mid-hunk cut must never
-// land inside a multiline import block. Each chunk's compiler runs its own
-// mandatory import pass, which recognizes a block only from its opener; a
-// severed tail would surface import members in the merged reading diff.
-func TestSplitDiff_KeepsMultilineImportBlockAtomic(t *testing.T) {
+// TestSplitDiff_ImportBlockNeverSeveredOrLeaked: a mid-hunk cut interacts
+// with the mandatory import pass, which recognizes a multiline block only
+// from its opener. The splitter pre-applies the whole-diff import mask, so
+// import scaffolding appears in no chunk at all — a chunk's own compiler
+// could not classify a severed tail — and never in the merged reading diff.
+func TestSplitDiff_ImportBlockNeverSeveredOrLeaked(t *testing.T) {
 	meta := "diff --git a/a.go b/a.go\n--- /dev/null\n+++ b/a.go\n"
-	// Rows before the import block position the greedy cut inside the block;
-	// atomicity must push the whole block into the next chunk instead.
+	// Rows before the import block position a naive greedy cut inside the
+	// block.
 	const before, members, after = 10, 8, 10
 	var body strings.Builder
 	fmt.Fprintf(&body, "@@ -0,0 +1,%d @@\n+package a\n+\n", 5+before+members+after)
@@ -290,8 +316,8 @@ func TestSplitDiff_KeepsMultilineImportBlockAtomic(t *testing.T) {
 		fmt.Fprintf(&body, "+var b%d = %d\n", i, i)
 	}
 	diff := meta + body.String()
-	// Budget sized so a per-line greedy cut would land mid-block: everything
-	// up to the block plus half its members.
+	// Budget sized so a naive per-line greedy cut would land mid-block:
+	// everything up to the block plus half its members.
 	prefix := strings.SplitAfter(diff, `"pkg3"`+"\n")[0]
 	budget := len(numberedDiff(prefix))
 	chunks, err := splitDiffForAbridging(diff, budget)
@@ -302,21 +328,15 @@ func TestSplitDiff_KeepsMultilineImportBlockAtomic(t *testing.T) {
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %d, want a real split", len(chunks))
 	}
-	sawBlock := false
 	for i, c := range chunks {
-		if !strings.Contains(c.text, `"pkg`) {
-			continue
+		if strings.Contains(c.text, `"pkg`) || strings.Contains(c.text, "import (") {
+			t.Errorf("chunk %d contains import scaffolding a chunk-local compiler cannot own:\n%s", i, c.text)
 		}
-		sawBlock = true
-		if !strings.Contains(c.text, "import (") || !strings.Contains(c.text, `"pkg7"`) {
-			t.Errorf("chunk %d severed the multiline import block:\n%s", i, c.text)
-		}
-	}
-	if !sawBlock {
-		t.Fatal("fixture lost its import block")
 	}
 
-	// End to end: the merged reading diff must contain no import scaffolding.
+	// End to end: the merged reading diff must contain no import scaffolding
+	// and keep every behavioral row — the same invariant the whole-diff
+	// compiler enforces.
 	defer setSingleRunBudget(t, budget)()
 	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
 		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds file.",
@@ -328,8 +348,10 @@ func TestSplitDiff_KeepsMultilineImportBlockAtomic(t *testing.T) {
 	if strings.Contains(res.SmartDiff, `"pkg`) || strings.Contains(res.SmartDiff, "+)") || strings.Contains(res.SmartDiff, "import (") {
 		t.Errorf("import scaffolding leaked into the merged reading diff:\n%s", res.SmartDiff)
 	}
-	if !strings.Contains(res.SmartDiff, "+func F() {}") {
-		t.Errorf("behavioral row lost from merged reading diff:\n%s", res.SmartDiff)
+	for _, want := range []string{"+func F() {}", "+var a0 = 0", "+var b9 = 9"} {
+		if !strings.Contains(res.SmartDiff, want) {
+			t.Errorf("behavioral row %q lost from merged reading diff:\n%s", want, res.SmartDiff)
+		}
 	}
 }
 
@@ -658,6 +680,134 @@ func TestAbridge_ChunkedFailurePropagates(t *testing.T) {
 	_, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff, MaxTurns: 2})
 	if err == nil || !strings.Contains(err.Error(), "chunk 2/2") {
 		t.Fatalf("err = %v, want failure naming chunk 2/2", err)
+	}
+}
+
+// TestAbridge_ChunkedErrorPreservesUnwrap: chunk failure labeling must keep
+// the wrapped error chain so errors.Is sees cancellation/deadline causes the
+// same way for chunked and single-run diffs.
+func TestAbridge_ChunkedErrorPreservesUnwrap(t *testing.T) {
+	defer setSingleRunBudget(t, 400)()
+	diff := fileSection("alpha.go", 10) + fileSection("beta.go", 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m := modelFunc(func(ctx context.Context) (*Response, error) { return nil, ctx.Err() })
+	_, err := Abridge(ctx, m, Request{UnifiedDiff: diff})
+	if err == nil {
+		t.Fatal("want error from canceled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false; chunk labeling broke the error chain: %v", err)
+	}
+	if !strings.Contains(err.Error(), "chunk 1/2") {
+		t.Errorf("err = %v, want chunk label in message", err)
+	}
+}
+
+// TestAbridge_ChunkedPreservesPackageRenameAcrossCut: the compiler keeps
+// package renames while hiding the import churn around them (pinned
+// monolithically by TestCompileEditPlan_MandatoryImportsPreservePackageRenames).
+// A mid-hunk cut that puts the -package/-import and +package/+import sides in
+// different chunks turns each side one-sided; the merged chunked result must
+// still keep both package rows and hide both imports.
+func TestAbridge_ChunkedPreservesPackageRenameAcrossCut(t *testing.T) {
+	meta := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n"
+	var b strings.Builder
+	b.WriteString(meta)
+	const pad = 6
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", 2+pad, 2+pad)
+	b.WriteString("-package oldname\n-import \"old\"\n")
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&b, " shared row %d\n", i)
+	}
+	b.WriteString("+package newname\n+import \"new\"\n")
+	diff := b.String()
+
+	// Whole-diff compilation is the reference: package rows kept, imports hidden.
+	whole, err := compileEditPlan(diff, editPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"-package oldname", "+package newname"} {
+		if !strings.Contains(whole.smartDiff, want) {
+			t.Fatalf("whole-diff reference lost %q:\n%s", want, whole.smartDiff)
+		}
+	}
+
+	// Budget forces the cut between the removed and added runs.
+	prefix := strings.SplitAfter(diff, "shared row 2\n")[0]
+	budget := len(numberedDiff(prefix))
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Renames the package.",
+	}))}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"-package oldname", "+package newname"} {
+		if !strings.Contains(res.SmartDiff, want) {
+			t.Errorf("chunked result lost package rename row %q:\n%s", want, res.SmartDiff)
+		}
+	}
+	if strings.Contains(res.SmartDiff, "import ") {
+		t.Errorf("chunked result retained import churn:\n%s", res.SmartDiff)
+	}
+}
+
+// TestAbridge_ChunkedEmbeddedImportsNeverLeak: imports inside an embedded
+// source string are recognized from the string's opener. A cut that severs
+// the opener from the embedded rows must not leak them: the splitter
+// pre-applies the whole-diff import mask, so the merged chunked result hides
+// exactly what whole-diff compilation hides.
+func TestAbridge_ChunkedEmbeddedImportsNeverLeak(t *testing.T) {
+	meta := "diff --git a/plugin_test.go b/plugin_test.go\n--- a/plugin_test.go\n+++ b/plugin_test.go\n"
+	const pad = 8
+	var b strings.Builder
+	b.WriteString(meta)
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", pad+6)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&b, "+var pre%d = %d\n", i, i)
+	}
+	b.WriteString("+const fixture = `\n+import pytest\n+const helper = require(\"./helper\").default;\n+run(helper)\n+`\n+func TestFixture() { execute(fixture) }\n")
+	diff := b.String()
+
+	whole, err := compileEditPlan(diff, editPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"import pytest", `require("./helper")`} {
+		if strings.Contains(whole.smartDiff, unwanted) {
+			t.Fatalf("whole-diff reference kept embedded import %q:\n%s", unwanted, whole.smartDiff)
+		}
+	}
+
+	// Budget cuts between the string opener and the embedded import rows.
+	prefix := strings.SplitAfter(diff, "const fixture = `\n")[0]
+	budget := len(numberedDiff(prefix))
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds fixture.",
+	}))}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"import pytest", `require("./helper")`} {
+		if strings.Contains(res.SmartDiff, unwanted) {
+			t.Errorf("embedded import %q leaked into chunked result:\n%s", unwanted, res.SmartDiff)
+		}
+	}
+	for _, want := range []string{"+run(helper)", "+func TestFixture"} {
+		if !strings.Contains(res.SmartDiff, want) {
+			t.Errorf("embedded behavior %q lost from chunked result:\n%s", want, res.SmartDiff)
+		}
 	}
 }
 
