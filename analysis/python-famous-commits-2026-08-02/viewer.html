@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Famous Python diffs — original vs Meat</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d10; --panel: #11151a; --panel2: #171c22; --line: #27303a;
+    --text: #dbe3ec; --muted: #8d99a8; --green: #6fdc8c; --green-bg: #10251a;
+    --red: #ff8a8a; --red-bg: #2a1417; --cyan: #72d7ef; --amber: #efc46f;
+    --accent: #a8a1ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+  body { font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  button, select, input { font: inherit; }
+  .shell { min-height: 100%; display: grid; grid-template-rows: auto auto auto minmax(420px, 1fr); }
+  header { padding: 18px 22px 12px; border-bottom: 1px solid var(--line); background: linear-gradient(135deg,#11151a,#0d1015); }
+  h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: -.02em; }
+  header p { margin: 0; color: var(--muted); max-width: 1000px; }
+  .tabs { display: flex; gap: 8px; padding: 10px 22px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .tab { border: 1px solid var(--line); color: var(--muted); background: var(--panel2); padding: 7px 12px; border-radius: 7px; cursor: pointer; }
+  .tab.active { color: white; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .overview { padding: 12px 22px; display: grid; grid-template-columns: minmax(260px,1.25fr) repeat(4,minmax(115px,.55fr)); gap: 10px; border-bottom: 1px solid var(--line); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+  .card h2 { font-size: 15px; margin: 0 0 5px; }
+  .card p { margin: 0; color: var(--muted); }
+  .metric strong { display: block; font-size: 19px; color: white; }
+  .metric span { color: var(--muted); font-size: 12px; }
+  .metric .good { color: var(--green); }
+  .workspace { display: grid; grid-template-columns: minmax(0,1fr) 320px; min-height: 0; }
+  .viewer { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr); }
+  .toolbar { padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: #0e1216; color: var(--muted); }
+  .toolbar label { display: inline-flex; align-items: center; gap: 6px; }
+  select { color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; }
+  .panes { min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
+  .pane { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr); border-right: 1px solid var(--line); }
+  .pane:last-child { border-right: 0; }
+  .pane-title { padding: 7px 11px; color: var(--muted); border-bottom: 1px solid var(--line); background: var(--panel); display:flex; justify-content:space-between; gap:10px; }
+  .pane-title b { color: var(--text); }
+  .code { overflow: auto; margin: 0; padding: 8px 0 18px; background: #0b0e12; font: 12px/1.52 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 4; }
+  .code.wrap .txt { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .line { min-height: 18px; display: grid; grid-template-columns: 48px minmax(max-content,1fr); }
+  .ln { position: sticky; left: 0; z-index: 1; text-align: right; padding-right: 9px; color: #596572; user-select: none; background: inherit; border-right: 1px solid rgba(255,255,255,.04); }
+  .txt { white-space: pre; padding: 0 10px; }
+  .add { background: var(--green-bg); color: var(--green); }
+  .del { background: var(--red-bg); color: var(--red); }
+  .hunk { color: var(--cyan); background: #101c22; }
+  .meta { color: #b6c0cb; background: #12171d; }
+  .ellipsis { color: var(--amber); font-weight: 700; background: #282110; }
+  .blankchange { opacity: .48; }
+  aside { min-height: 0; overflow: auto; padding: 14px; background: var(--panel); border-left: 1px solid var(--line); }
+  aside h3 { margin: 0 0 8px; font-size: 14px; color: white; }
+  aside h3:not(:first-child) { margin-top: 17px; }
+  aside ul { padding-left: 18px; margin: 7px 0; }
+  aside li { margin: 5px 0; color: #c5ced8; }
+  .tag { display: inline-block; padding: 2px 6px; border-radius: 999px; font-size: 11px; background: #242036; color: #c7c1ff; border: 1px solid #393258; }
+  .callout { border-left: 3px solid var(--amber); padding: 8px 10px; color: #e8dcc2; background: #1b1810; }
+  code { font: .92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #d6d1ff; }
+  @media (max-width: 1050px) {
+    .overview { grid-template-columns: repeat(2,1fr); }
+    .overview .summary-card { grid-column: 1 / -1; }
+    .workspace { grid-template-columns: 1fr; }
+    aside { border-left: 0; border-top: 1px solid var(--line); max-height: 330px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>Famous Python diffs: original vs live Meat</h1>
+    <p>Fresh <code>claude-opus-4-8</code> runs on August 2, 2026, with upstream repo context. Live output is selected by default; switch the right pane to the hand-reviewed reference to see the remaining headroom.</p>
+  </header>
+  <nav class="tabs" id="tabs"></nav>
+  <section class="overview" id="overview"></section>
+  <main class="workspace">
+    <section class="viewer">
+      <div class="toolbar">
+        <label>Right pane <select id="variant"><option value="live">Live Meat output</option><option value="golden">Reviewed reference</option></select></label>
+        <label><input id="sync" type="checkbox" checked> sync scrolling</label>
+        <label><input id="wrap" type="checkbox"> wrap long lines</label>
+        <span><span class="tag">green</span> added &nbsp; <span class="tag">red</span> removed &nbsp; <span class="tag">amber</span> folded</span>
+      </div>
+      <div class="panes">
+        <section class="pane">
+          <div class="pane-title"><b>Original Python diff</b><span id="leftStats"></span></div>
+          <div class="code" id="left"></div>
+        </section>
+        <section class="pane">
+          <div class="pane-title"><b id="rightTitle">Live Meat output</b><span id="rightStats"></span></div>
+          <div class="code" id="right"></div>
+        </section>
+      </div>
+    </section>
+    <aside id="analysis"></aside>
+  </main>
+</div>
+<script>
+const projects = {
+  django: {
+    tab: "Django · CVE header parsing", title: "Django: normalize HTTP header token lists",
+    commit: "526b1b414d8e", summary: "A shared generator fully strips header tokens, fixing first/last whitespace in cache, Vary, ETag, and middleware paths while documenting the quoted-value boundary.",
+    raw: {changed:178, rows:329, bytes:14468}, live:{changed:112, rows:231, bytes:9466}, golden:{changed:89, rows:155, bytes:6685},
+    files: {original:"django-original.diff", live:"django-live.diff", golden:"django-golden.diff"},
+    kept: [
+      "The complete helper contract, quoted-value caveat, strip transformation, and empty-token guard.",
+      "The genuinely new normalization of incoming <code>newheaders</code>.",
+      "Representative production effects, a padded max-age stimulus, and the cache-key inequality outcome.",
+      "All import scaffolding is gone; the repetitive table interiors are folded."
+    ],
+    boring: [
+      "Repeated <code>cc_delim_re.split(X)</code> → <code>split_header_value(X)</code> call-site substitutions after one anchor.",
+      "Duplicate <code>assertIsNotNone</code> checks already implied by <code>assertNotEqual</code>.",
+      "Four consecutive, identically indented ellipses inside one table should coalesce to one.",
+      "Fourteen bare changed blank rows, plus duplicated basic/custom-separator test harnesses."
+    ],
+    warning: "Stimulus selection is still weak: both helper tables retain the cheapest <code>(\"\", [])</code> row while wildcard, tab, comma/semicolon-boundary, and custom-separator outcomes stay hidden.",
+    target: "Target: 85–90/178 changed rows, roughly 155 physical rows."
+  },
+  flask: {
+    tab: "Flask · session access", title: "Flask: move session-access tracking to RequestContext",
+    commit: "c17f37939073", summary: "A RequestContext property marks the backing session accessed, while internal lifecycle/save paths deliberately bypass it; tests expose the resulting Vary: Cookie behavior.",
+    raw:{changed:124, rows:234, bytes:8803}, live:{changed:96, rows:178, bytes:6739}, golden:{changed:63, rows:120, bytes:5037},
+    files:{original:"flask-original.diff", live:"flask-live.diff", golden:"flask-golden.diff"},
+    kept: [
+      "The property contract and exact <code>self._session.accessed = True</code> effect.",
+      "Semantic bypasses in save, copy, and push paths—not merely a private-field rename.",
+      "The new default, type narrowing, template proxy caveat, and representative Vary outcomes.",
+      "The repeated dict-method overrides are collapsed, and import-only churn is hidden."
+    ],
+    boring: [
+      "Eight bare changed blank rows remain.",
+      "Sixteen rows of the superseded old test body and its duplicate assertions stay verbatim.",
+      "Twelve rows of access-tracking docstrings could be reduced to the contract and Vary sentence.",
+      "Response-text assertions and repeated exception/lifecycle context add little."
+    ],
+    warning: "Budget is still inverted: every new <code>accessed</code> assertion and most <code>modified</code> outcomes are folded, while the dead old assertions remain. The removed <code>accessed = True</code> side is also missing, obscuring the default inversion.",
+    target: "Target: 68–80/124 changed rows, at most about 150 physical rows."
+  },
+  pytest: {
+    tab: "pytest · hook ordering", title: "pytest: apply warning filters before pytest_configure hooks",
+    commit: "b4e846616cbb", summary: "The warning context moves into Config and is entered before the historic pytest_configure call, so configured filters cover both early and late hooks.",
+    raw:{changed:109, rows:159, bytes:6468}, live:{changed:83, rows:123, bytes:4573}, golden:{changed:42, rows:65, bytes:2615},
+    files:{original:"pytest-original.diff", live:"pytest-live.diff", golden:"pytest-golden.diff"},
+    kept: [
+      "The import-cycle explanation, warnings-plugin guard, and ordering relative to <code>call_historic</code>.",
+      "Exact moved-body symmetry with indentation-correct ellipses and visible <code>apply_warning_filters(...)</code> anchors.",
+      "The new call site, old lifecycle removal, tryfirst stimulus, configured filter, and outcomes.",
+      "Import churn and generated-conftest imports are gone."
+    ],
+    boring: [
+      "The removed filter-input/catch_warnings/payload prologue duplicates the destination copy.",
+      "<code>addinivalue_line(...)</code> is duplicated in full merely to show a dedent.",
+      "Eight bare changed blank lines survive.",
+      "One-line pytester harness setup adds little."
+    ],
+    warning: "The payload is now visible, but the non-obvious <code>record=False</code> rationale is folded on both sides. Restore the destination explanation and fund it by dropping duplicate prologue/dedent material.",
+    target: "Target: 74–78/109 changed rows."
+  }
+};
+let current = "django";
+const $ = s => document.querySelector(s);
+const fallbackPaths = {
+  "django-original.diff":"../../meat/testdata/python/django-526b1b414d8e.diff",
+  "django-live.diff":"django.live.diff",
+  "django-golden.diff":"../../meat/testdata/python/django-526b1b414d8e.golden.diff",
+  "flask-original.diff":"../../meat/testdata/python/flask-c17f37939073.diff",
+  "flask-live.diff":"flask.live.diff",
+  "flask-golden.diff":"../../meat/testdata/python/flask-c17f37939073.golden.diff",
+  "pytest-original.diff":"../../meat/testdata/python/pytest-b4e846616cbb.diff",
+  "pytest-live.diff":"pytest.live.diff",
+  "pytest-golden.diff":"../../meat/testdata/python/pytest-b4e846616cbb.golden.diff"
+};
+const bundledFiles = window.__FILES__ || {};
+const file = name => bundledFiles[name] || `Missing diff: ${name}\n`;
+async function loadStandaloneFiles() {
+  if (window.__FILES__) return;
+  await Promise.all(Object.entries(fallbackPaths).map(async ([name,path]) => {
+    const response = await fetch(path);
+    bundledFiles[name] = response.ok ? await response.text() : `Could not load ${path}: HTTP ${response.status}\n`;
+  }));
+}
+const pct = (a,b) => (100*a/b).toFixed(1) + "%";
+const fmt = n => n.toLocaleString("en-US");
+function classify(s) {
+  const body = s.length ? s.slice(1).trim() : "";
+  if (body === "...") return "ellipsis";
+  if (s.startsWith("diff --git") || s.startsWith("index ") || s.startsWith("--- ") || s.startsWith("+++ ")) return "meta";
+  if (s.startsWith("@@")) return "hunk";
+  if (s.startsWith("+") && !s.startsWith("+++")) return "add" + (s === "+" ? " blankchange" : "");
+  if (s.startsWith("-") && !s.startsWith("---")) return "del" + (s === "-" ? " blankchange" : "");
+  return "ctx";
+}
+function renderDiff(node, text) {
+  node.replaceChildren();
+  const frag = document.createDocumentFragment();
+  text.replace(/\n$/, "").split("\n").forEach((s,i) => {
+    const row = document.createElement("div"); row.className = "line " + classify(s);
+    const ln = document.createElement("span"); ln.className="ln"; ln.textContent=i+1;
+    const txt = document.createElement("span"); txt.className="txt"; txt.textContent=s || " ";
+    row.append(ln,txt); frag.append(row);
+  });
+  node.append(frag); node.scrollTop=0; node.scrollLeft=0;
+}
+function metric(label, value, sub, good=false) {
+  return `<div class="card metric"><span>${label}</span><strong class="${good?'good':''}">${value}</strong><span>${sub}</span></div>`;
+}
+function renderTabs() {
+  $("#tabs").innerHTML = Object.entries(projects).map(([k,p]) => `<button class="tab ${k===current?'active':''}" data-key="${k}">${p.tab}</button>`).join("");
+  document.querySelectorAll(".tab").forEach(b => b.onclick=()=>{current=b.dataset.key; renderAll();});
+}
+function renderAll() {
+  const p=projects[current], variant=$("#variant").value, shown=p[variant];
+  renderTabs();
+  $("#overview").innerHTML = `<div class="card summary-card"><h2>${p.title}</h2><p><code>${p.commit}</code> — ${p.summary}</p></div>`+
+    metric("Changed rows shown", `${shown.changed}/${p.raw.changed}`, `${pct(shown.changed,p.raw.changed)} retained`, variant==="golden")+
+    metric("Changed rows elided", fmt(p.raw.changed-shown.changed), `${pct(p.raw.changed-shown.changed,p.raw.changed)} removed`, true)+
+    metric("Physical rows", `${shown.rows}/${p.raw.rows}`, `${pct(shown.rows,p.raw.rows)} retained`)+
+    metric("Bytes", `${fmt(shown.bytes)}/${fmt(p.raw.bytes)}`, `${pct(p.raw.bytes-shown.bytes,p.raw.bytes)} reduction`);
+  renderDiff($("#left"),file(p.files.original)); renderDiff($("#right"),file(p.files[variant]));
+  $("#rightTitle").textContent = variant==="live" ? "Live Meat output" : "Reviewed reference";
+  $("#leftStats").textContent = `${p.raw.changed} changed · ${p.raw.rows} rows`;
+  $("#rightStats").textContent = `${shown.changed} changed · ${shown.rows} rows`;
+  $("#analysis").innerHTML = `<h3>Preserved well</h3><ul>${p.kept.map(x=>`<li>${x}</li>`).join("")}</ul>`+
+    `<h3>Still boring</h3><ul>${p.boring.map(x=>`<li>${x}</li>`).join("")}</ul>`+
+    `<h3>Budget critique</h3><div class="callout">${p.warning}</div>`+
+    `<h3>Suggested live target</h3><p>${p.target}</p>`;
+}
+let syncing=false;
+function syncScroll(source,target) {
+  if (!$("#sync").checked || syncing) return;
+  syncing=true;
+  const maxS=source.scrollHeight-source.clientHeight, maxT=target.scrollHeight-target.clientHeight;
+  target.scrollTop=maxS>0 ? source.scrollTop/maxS*maxT : 0;
+  target.scrollLeft=source.scrollLeft;
+  requestAnimationFrame(()=>syncing=false);
+}
+$("#left").addEventListener("scroll",()=>syncScroll($("#left"),$("#right")));
+$("#right").addEventListener("scroll",()=>syncScroll($("#right"),$("#left")));
+$("#variant").onchange=renderAll;
+$("#wrap").onchange=e=>document.querySelectorAll(".code").forEach(n=>n.classList.toggle("wrap",e.target.checked));
+loadStandaloneFiles().then(renderAll);
+</script>
+</body>
+</html>
