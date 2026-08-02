@@ -132,11 +132,15 @@ func applyEditPlan(raw string, in submission) (string, error) {
 }
 
 func compileSubmission(raw string, in submission) (compiledPlan, error) {
+	return compileSubmissionCtl(raw, in, true)
+}
+
+func compileSubmissionCtl(raw string, in submission, detectMoves bool) (compiledPlan, error) {
 	var problems []error
 	if err := validateSummary(in.Summary); err != nil {
 		problems = append(problems, err)
 	}
-	compiled, err := compileEditPlan(raw, in.plan())
+	compiled, err := compileEditPlanCtl(raw, in.plan(), detectMoves)
 	if err != nil {
 		problems = append(problems, err)
 	}
@@ -149,6 +153,15 @@ func compileSubmission(raw string, in submission) (compiledPlan, error) {
 // compileEditPlan validates and applies a plan without requiring a summary, so
 // the exact reading diff can be previewed before final submission.
 func compileEditPlan(raw string, in editPlan) (compiledPlan, error) {
+	return compileEditPlanCtl(raw, in, true)
+}
+
+// compileEditPlanCtl is compileEditPlan with move detection controllable.
+// Chunked abridging disables it: move uniqueness is a whole-diff property (a
+// block appearing three times globally is deliberately ambiguous, but a chunk
+// seeing only two occurrences would invent a move), so the splitter
+// pre-resolves moves against the whole diff instead.
+func compileEditPlanCtl(raw string, in editPlan, detectMoves bool) (compiledPlan, error) {
 	var problems []error
 
 	lines := splitSourceLines(raw)
@@ -159,7 +172,10 @@ func compileEditPlan(raw string, in editPlan) (compiledPlan, error) {
 	if len(layout.problems) > 0 {
 		return compiledPlan{}, joinEditPlanErrors(layout.problems)
 	}
-	moves := detectExactMoves(lines, layout)
+	var moves []detectedMove
+	if detectMoves {
+		moves = detectExactMoves(lines, layout)
+	}
 	mandatoryRemovals := mandatoryImportRemovalPlan(lines, layout)
 	mandatoryHidden := mandatoryRemovalMask(len(lines), mandatoryRemovals)
 	applyMandatoryMovePrecedence(moves, mandatoryHidden)

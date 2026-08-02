@@ -1168,6 +1168,151 @@ func TestAbridge_ChunkedCrossFileImportMoveStaysHidden(t *testing.T) {
 	}
 }
 
+// TestAbridge_ChunkedDoesNotInventMoves: move uniqueness is a whole-diff
+// property. A block occurring three times globally (ambiguous — no move
+// detected, no symmetry enforced) must not become a detected "move" inside a
+// chunk that happens to contain exactly one removal and one addition; chunk
+// runs skip move detection entirely.
+func TestAbridge_ChunkedDoesNotInventMoves(t *testing.T) {
+	block := "    alpha := prepare(source)\n    beta := transform(alpha)\n    publish(beta)\n    record(beta)\n"
+	blockLines := splitSourceLines(block)
+	section := func(name string, marker byte, extra int) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n", name, name, name, name)
+		old, new := 1+len(blockLines)+extra, 1
+		if marker == '+' {
+			old, new = new, old
+		}
+		fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n context %s\n", old, new, name)
+		for _, l := range blockLines {
+			b.WriteByte(marker)
+			b.WriteString(l.text)
+			b.WriteByte('\n')
+		}
+		for i := 0; i < extra; i++ {
+			fmt.Fprintf(&b, "%cfiller %s %d\n", marker, name, i)
+		}
+		return b.String()
+	}
+	// The block is removed once and added twice: globally ambiguous.
+	diff := section("a.go", '-', 3) + section("b.go", '+', 3) + section("c.go", '+', 3)
+	if n := len(detectedMovesInDiff(diff)); n != 0 {
+		t.Fatalf("fixture should be globally ambiguous, detected %d moves", n)
+	}
+
+	// Split so a.go and b.go share chunk 1 (where the pair looks unique) and
+	// c.go lands in chunk 2.
+	secondStart := strings.Index(diff, "diff --git a/c.go")
+	budget := len(numberedDiff(diff[:secondStart]))
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+
+	// The chunk-1 plan folds ONLY the removal side of the would-be move pair.
+	// With chunk-local move detection this was rejected (asymmetric move
+	// treatment) even though the whole diff detects no move at all.
+	var remove6to9 []lineFold
+	remove6to9 = append(remove6to9, lineFold{StartLine: 6, EndLine: 9})
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("s1", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: remove6to9, Summary: "Removes pipeline.",
+		})),
+		assistant(toolUse("s2", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds pipeline.",
+		})),
+	}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.seen != 2 {
+		t.Fatalf("model calls = %d, want 2 (asymmetric fold must not be rejected in a chunk)", m.seen)
+	}
+	if !strings.Contains(res.SmartDiff, "-    ...") {
+		t.Errorf("chunk-1 fold missing from merged result:\n%s", res.SmartDiff)
+	}
+	// No move hint appears in any chunk prompt.
+	for i, msgs := range m.seenMessages {
+		if strings.Contains(msgs[0].Content[0].Text, "exact source-evidenced moves") {
+			t.Errorf("chunk %d prompt contains a move hint over a fragment", i)
+		}
+	}
+}
+
+// TestSplitDiff_PythonOwnerNotSeveredFromBody: a cut directly after a Python
+// suite owner (def/if/decorator) would let one chunk's plan remove the owner
+// while the body — invisible to that chunk's validator — survives in the
+// next chunk. Owners are atomic with their first body row.
+func TestSplitDiff_PythonOwnerNotSeveredFromBody(t *testing.T) {
+	meta := "diff --git a/mod.py b/mod.py\n--- a/mod.py\n+++ b/mod.py\n"
+	const pad = 8
+	var b strings.Builder
+	b.WriteString(meta)
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", pad+4)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&b, "+x%d = %d\n", i, i)
+	}
+	b.WriteString("+if enabled:\n+    activate()\n+    finish()\n+done = True\n")
+	diff := b.String()
+
+	// Budgets that would naively cut right after the owner row.
+	for _, mark := range []string{"+if enabled:\n"} {
+		prefix := strings.SplitAfter(diff, mark)[0]
+		budget := len(numberedDiff(prefix))
+		chunks, err := splitDiffForAbridging(diff, budget)
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		requireValidChunks(t, chunks, budget)
+		for i, c := range chunks {
+			if strings.Contains(c.text, "+if enabled:") && !strings.Contains(c.text, "+    activate()") {
+				t.Errorf("budget at %q: chunk %d severed the suite owner from its body:\n%s", mark, i, c.text)
+			}
+		}
+	}
+}
+
+// TestAbridge_ChunkedImportOnlySectionsMakeNoModelRuns: sections and hunks
+// the whole-diff compiler removes entirely (import-only) are skipped by the
+// splitter, so a many-file import-churn diff does not pay one agent run per
+// file shell.
+func TestAbridge_ChunkedImportOnlySectionsMakeNoModelRuns(t *testing.T) {
+	importSection := func(name string) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,2 +1,2 @@\n-import \"old/dep\"\n+import \"new/dep\"\n context\n", name, name, name, name)
+		return b.String()
+	}
+	behavioral := fileSection("real.go", 10)
+	var b strings.Builder
+	for i := 0; i < 6; i++ {
+		b.WriteString(importSection(fmt.Sprintf("dep%d.go", i)))
+	}
+	b.WriteString(behavioral)
+	diff := b.String()
+	budget := len(numberedDiff(behavioral)) + 40
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+	m := &scriptedModel{turns: []*Response{assistant(toolUse("s", "submit", submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds real rows.",
+	}))}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.seen != 1 {
+		t.Errorf("model calls = %d, want 1 (import-only sections must not spend agent runs)", m.seen)
+	}
+	if strings.Contains(res.SmartDiff, "dep0.go") || strings.Contains(res.SmartDiff, "import") {
+		t.Errorf("import-only sections leaked into the merged result:\n%s", res.SmartDiff)
+	}
+	if !strings.Contains(res.SmartDiff, "+real.go row 0") {
+		t.Errorf("behavioral section lost:\n%s", res.SmartDiff)
+	}
+}
+
 func TestFitsSingleRun(t *testing.T) {
 	diff := "diff --git a/a b/a\n@@ -1 +1 @@\n+x\n"
 	if !fitsSingleRun(diff, len(numberedDiff(diff))) {

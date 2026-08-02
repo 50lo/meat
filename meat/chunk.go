@@ -12,13 +12,16 @@
 //
 // Each chunk is abridged by its own agent run with the same rubric and its
 // own 1-based numbering; nothing on the model-visible prompt surface changes.
-// The cost is cross-chunk context: exact-move detection runs per chunk, so a
-// move whose sides land in different chunks is judged independently on each
-// side rather than being enforced symmetric, and a mid-hunk split can leave a
-// context-only sub-hunk (which a plan must drop entirely) or start a segment
-// inside a Python multiline string (weakening that chunk's Python
-// validators). Splitting prefers file boundaries, then hunk boundaries,
-// specifically to keep those losses rare.
+// Whole-diff analyses that a fragment cannot reproduce are pre-resolved by
+// the splitter and mirrored into each chunk: the mandatory import mask
+// (including move-precedence extension and Python suite placeholders) is
+// applied to segment bodies up front, string interiors and no-newline
+// markers are never cut, and per-chunk agent runs skip move detection
+// entirely — fragment-local occurrence counts would invent moves the whole
+// diff rejects as ambiguous. The remaining cost of chunking is judgment
+// locality: the model reasons over one chunk at a time, and cross-chunk
+// Python reference validation is per-chunk only. Splitting prefers file
+// boundaries, then hunk boundaries, to keep those costs rare.
 
 package meat
 
@@ -190,6 +193,14 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 		return nil
 	}
 	for id, s := range sections {
+		if b.spanFullyHidden(s) {
+			// The whole-diff compiler removes this section entirely (an
+			// import-only file shell); no chunk or model run is needed.
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if b.spanHasExtraHidden(s) {
 			// Rows only a whole-diff pass hides (cross-file move counterparts)
 			// must be dropped from the chunk text; splitSection's segmenting
@@ -432,6 +443,12 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 		return nil
 	}
 	for _, h := range hunks {
+		if b.spanFullyHidden(h) {
+			// An import-only hunk: the whole-diff compiler removes it
+			// entirely, header included. Skip it; the surrounding pieces
+			// concatenate across the gap.
+			continue
+		}
 		if b.spanHasExtraHidden(h) {
 			// Rows hidden only by whole-diff move analysis must be dropped
 			// from the emitted text; the segmenting path owns that.
@@ -526,6 +543,29 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		j := i + 1
 		for j < bodyEnd && (b.layout.kinds[j] == diffLineNoNewline || b.inString[j]) {
 			j++
+		}
+		// A Python decorator or suite header absorbs following blank rows and
+		// its first body row (recursively for nested owners): a cut directly
+		// after an owner would let one chunk's plan hide it while the body,
+		// invisible to that chunk's validator, survives in the next.
+		last := i
+		for b.pythonOwnerLine(last) {
+			advanced := false
+			for j < bodyEnd && isHunkSource(b.layout.kinds[j]) && len(b.lines[j].text) > 0 {
+				row := j
+				j++
+				for j < bodyEnd && (b.layout.kinds[j] == diffLineNoNewline || b.inString[j]) {
+					j++
+				}
+				last = row
+				advanced = true
+				if strings.TrimSpace(b.lines[row].text[1:]) != "" {
+					break
+				}
+			}
+			if !advanced {
+				break
+			}
 		}
 		return j
 	}
@@ -679,6 +719,20 @@ func (b *chunkBuilder) placeholderRow(i int) (text, eol string, ok bool) {
 	return string(f.marker) + f.indent + "...", f.eol, true
 }
 
+// pythonOwnerLine reports whether line i is a visible Python decorator or
+// suite header on the kept/added side — an anchor whose body must not be
+// severed into a different chunk.
+func (b *chunkBuilder) pythonOwnerLine(i int) bool {
+	if !b.layout.python[i] || b.hidden[i] || !isHunkSource(b.layout.kinds[i]) || len(b.lines[i].text) < 2 || b.lines[i].text[0] == '-' {
+		return false
+	}
+	if b.inString[i] {
+		return false
+	}
+	trimmed := trimPythonCode(b.lines[i].text[1:])
+	return strings.HasPrefix(trimmed, "@") || isPythonSuiteHeaderStart(trimmed)
+}
+
 // spanHasExtraHidden reports whether the span contains rows hidden only by
 // whole-diff analysis (move-precedence extension), which a chunk-local
 // compiler could not re-derive.
@@ -689,6 +743,18 @@ func (b *chunkBuilder) spanHasExtraHidden(s lineSpan) bool {
 		}
 	}
 	return false
+}
+
+// spanFullyHidden reports whether the whole-diff mandatory pass hides every
+// line of the span (an import-only hunk or file shell), meaning whole-diff
+// compilation removes it completely regardless of any model plan.
+func (b *chunkBuilder) spanFullyHidden(s lineSpan) bool {
+	for i := s.start; i < s.end; i++ {
+		if !b.hidden[i] {
+			return false
+		}
+	}
+	return s.end > s.start
 }
 
 // synthHunkHeader renders a segment's @@ header from its side starts and
@@ -822,6 +888,7 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 		label := fmt.Sprintf("chunk %d/%d", run, modelChunks)
 		sub := req
 		sub.UnifiedDiff = chunk.text
+		sub.chunkRun = true
 		sub.Progress = func(msg string) { progress(label + ": " + msg) }
 		res, err := abridgeOne(ctx, model, sub)
 		if err != nil {
