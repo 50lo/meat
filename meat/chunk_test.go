@@ -1298,6 +1298,32 @@ func TestSplitDiff_PythonOwnerNotSeveredFromBody(t *testing.T) {
 			}
 		}
 	}
+
+	// An owner whose first following rows are a dropped import and a comment:
+	// neither emits as semantic body, so the atomic unit must extend through
+	// the first real body row (activate()).
+	var d strings.Builder
+	d.WriteString(meta)
+	fmt.Fprintf(&d, "@@ -0,0 +1,%d @@\n", pad+5)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&d, "+z%d = %d\n", i, i)
+	}
+	d.WriteString("+if enabled:\n+    import optional_dep\n+    # explanatory comment\n+    activate()\n+done = True\n")
+	diff3 := d.String()
+	for _, mark := range []string{"+if enabled:\n", "+    import optional_dep\n", "+    # explanatory comment\n"} {
+		prefix := strings.SplitAfter(diff3, mark)[0]
+		budget := len(numberedDiff(prefix))
+		chunks, err := splitDiffForAbridging(diff3, budget)
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		requireValidChunks(t, chunks, budget)
+		for i, ch := range chunks {
+			if strings.Contains(ch.text, "+if enabled:") && !strings.Contains(ch.text, "+    activate()") {
+				t.Errorf("budget at %q: chunk %d severed the owner from its first emitted body row:\n%s", mark, i, ch.text)
+			}
+		}
+	}
 }
 
 // TestAbridge_ChunkedImportOnlySectionsMakeNoModelRuns: sections and hunks

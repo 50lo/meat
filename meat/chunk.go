@@ -591,11 +591,13 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 			j++
 		}
 		// A Python decorator or suite header absorbs following rows through
-		// its first nonblank body row on the kept/added side (recursively for
-		// nested owners): a cut directly after an owner would let one chunk's
-		// plan hide it while the body, invisible to that chunk's validator,
-		// survives in the next. Removed-side rows do not satisfy a kept
-		// owner's body.
+		// its first row that will actually EMIT as semantic body on the
+		// kept/added side (recursively for nested owners): a cut directly
+		// after an owner would let one chunk's plan hide it while the body,
+		// invisible to that chunk's validator, survives in the next.
+		// Removed-side rows, dropped import rows (unless they emit a
+		// placeholder), comments, and blank rows do not satisfy the owner —
+		// the chunk-local validators would not count them as a body either.
 		last := i
 		for b.pythonOwnerLine(last) {
 			advanced := false
@@ -607,7 +609,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 				}
 				last = row
 				advanced = true
-				if b.lines[row].text[0] != '-' && strings.TrimSpace(b.lines[row].text[1:]) != "" {
+				if b.emitsPythonBody(row) {
 					break
 				}
 			}
@@ -784,6 +786,20 @@ func (b *chunkBuilder) pythonOwnerLine(i int) bool {
 	}
 	trimmed := trimPythonCode(b.lines[i].text[1:])
 	return strings.HasPrefix(trimmed, "@") || isPythonSuiteHeaderStart(trimmed)
+}
+
+// emitsPythonBody reports whether line i will emit as a semantic body row on
+// the kept/added side of a chunk: kept rows with real code (not comments or
+// blanks), or hidden rows that emit a mandatory suite placeholder.
+func (b *chunkBuilder) emitsPythonBody(i int) bool {
+	if len(b.lines[i].text) == 0 || b.lines[i].text[0] == '-' {
+		return false
+	}
+	if b.hidden[i] {
+		_, _, ok := b.placeholderRow(i)
+		return ok
+	}
+	return trimPythonCode(b.lines[i].text[1:]) != ""
 }
 
 // spanHasExtraHidden reports whether the span contains rows hidden only by
