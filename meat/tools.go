@@ -29,9 +29,12 @@ type toolbox struct {
 	submittedPlan  *compiledPlan
 	submitFeedback string
 	submitSeen     bool
-	// noMoves disables per-plan move detection/enforcement for chunk runs,
-	// where move uniqueness computed over a fragment would be wrong.
+	// noMoves disables per-plan move DETECTION for chunk runs, where move
+	// uniqueness computed over a fragment would be wrong; moves carries the
+	// whole-diff moves the splitter mapped into this chunk's coordinates,
+	// which are enforced instead.
 	noMoves bool
+	moves   []detectedMove
 }
 
 func editPlanToolSchema(withSummary bool) json.RawMessage {
@@ -212,7 +215,7 @@ func (tb *toolbox) previewPlan(raw json.RawMessage) (string, bool) {
 	if err := requirePlanArrays(in.Remove, in.Replace, in.Fold); err != nil {
 		return "invalid input: " + err.Error(), true
 	}
-	compiled, err := compileEditPlanCtl(tb.rawDiff, in, !tb.noMoves)
+	compiled, err := compileEditPlanMoves(tb.rawDiff, in, tb.moves, !tb.noMoves)
 	if err != nil {
 		return truncateForTool(fmt.Sprintf("invalid edit plan: %v", err)), true
 	}
@@ -230,7 +233,7 @@ func (tb *toolbox) submit(raw json.RawMessage) (string, bool) {
 	if err := requirePlanArrays(in.Remove, in.Replace, in.Fold); err != nil {
 		return "invalid input: " + err.Error(), true
 	}
-	compiled, err := compileSubmissionCtl(tb.rawDiff, in, !tb.noMoves)
+	compiled, err := compileSubmissionMoves(tb.rawDiff, in, tb.moves, !tb.noMoves)
 	if err != nil {
 		return truncateForTool(fmt.Sprintf("invalid edit plan: %v", err)), true
 	}

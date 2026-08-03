@@ -1243,7 +1243,8 @@ func TestAbridge_ChunkedDoesNotInventMoves(t *testing.T) {
 // TestSplitDiff_PythonOwnerNotSeveredFromBody: a cut directly after a Python
 // suite owner (def/if/decorator) would let one chunk's plan remove the owner
 // while the body — invisible to that chunk's validator — survives in the
-// next chunk. Owners are atomic with their first body row.
+// next chunk. Owners are atomic with their first kept-side body row;
+// removed-side rows between them do not satisfy the owner.
 func TestSplitDiff_PythonOwnerNotSeveredFromBody(t *testing.T) {
 	meta := "diff --git a/mod.py b/mod.py\n--- a/mod.py\n+++ b/mod.py\n"
 	const pad = 8
@@ -1268,6 +1269,32 @@ func TestSplitDiff_PythonOwnerNotSeveredFromBody(t *testing.T) {
 		for i, c := range chunks {
 			if strings.Contains(c.text, "+if enabled:") && !strings.Contains(c.text, "+    activate()") {
 				t.Errorf("budget at %q: chunk %d severed the suite owner from its body:\n%s", mark, i, c.text)
+			}
+		}
+	}
+
+	// A context owner whose new body follows removed old rows: the cut must
+	// not land between the owner (or the removed rows) and the first kept
+	// body row.
+	var c strings.Builder
+	c.WriteString(meta)
+	fmt.Fprintf(&c, "@@ -1,%d +1,%d @@\n", pad+3, pad+3)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&c, " y%d = %d\n", i, i)
+	}
+	c.WriteString(" if enabled:\n-    old_activate()\n+    new_activate()\n context_tail = 1\n")
+	diff2 := c.String()
+	for _, mark := range []string{" if enabled:\n", "-    old_activate()\n"} {
+		prefix := strings.SplitAfter(diff2, mark)[0]
+		budget := len(numberedDiff(prefix))
+		chunks, err := splitDiffForAbridging(diff2, budget)
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		requireValidChunks(t, chunks, budget)
+		for i, ch := range chunks {
+			if strings.Contains(ch.text, " if enabled:") && !strings.Contains(ch.text, "+    new_activate()") {
+				t.Errorf("budget at %q: chunk %d severed the context owner from its kept body:\n%s", mark, i, ch.text)
 			}
 		}
 	}
@@ -1310,6 +1337,75 @@ func TestAbridge_ChunkedImportOnlySectionsMakeNoModelRuns(t *testing.T) {
 	}
 	if !strings.Contains(res.SmartDiff, "+real.go row 0") {
 		t.Errorf("behavioral section lost:\n%s", res.SmartDiff)
+	}
+}
+
+// TestAbridge_ChunkedEnforcesWholeDiffMoves: a genuine whole-diff move whose
+// two sides land in the SAME chunk keeps full symmetry enforcement there:
+// the whole-diff move set is mapped into chunk coordinates, hinted in the
+// chunk prompt, and an asymmetric plan is rejected.
+func TestAbridge_ChunkedEnforcesWholeDiffMoves(t *testing.T) {
+	// surfaceFixtureDiff contains one exact cross-file move (old.txt lines
+	// 6-9 ↔ new.txt lines 16-19). Pad a third unrelated section so the diff
+	// splits with both move sides in chunk 1.
+	pad := fileSection("zzz.go", 12)
+	diff := surfaceFixtureDiff + pad
+	budget := len(numberedDiff(surfaceFixtureDiff)) + 20
+	defer setSingleRunBudget(t, budget)()
+	if fitsSingleRun(diff, budget) {
+		t.Fatal("fixture should exceed the budget")
+	}
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) < 2 || !strings.Contains(chunks[0].text, "new_location_ready") {
+		t.Fatalf("fixture should put both move sides in chunk 1; got %d chunks", len(chunks))
+	}
+
+	// First submission folds only ONE side of the move pair — must be
+	// rejected. Second submission treats both sides symmetrically.
+	asym := submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{},
+		Fold:    []lineFold{{StartLine: 6, EndLine: 9}},
+		Summary: "Relocates the pipeline.",
+	}
+	sym := submission{
+		Remove: []lineRange{}, Replace: []lineReplacement{},
+		Fold:    []lineFold{{StartLine: 6, EndLine: 9}, {StartLine: 16, EndLine: 19}},
+		Summary: "Relocates the pipeline.",
+	}
+	identity := submission{Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds rows."}
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("bad", "submit", asym)),
+		assistant(toolUse("good", "submit", sym)),
+		assistant(toolUse("z", "submit", identity)),
+	}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.seen != 3 {
+		t.Fatalf("model calls = %d, want 3 (asymmetric rejected, symmetric accepted, second chunk)", m.seen)
+	}
+	// The chunk prompt carried the move hint in chunk coordinates.
+	if prompt := m.seenMessages[0][0].Content[0].Text; !strings.Contains(prompt, "-6..9 \u2194 +16..19") {
+		t.Errorf("chunk prompt lost the whole-diff move hint:\n%s", prompt)
+	}
+	// The rejection reached the model as a tool error naming the asymmetry.
+	var sawMoveError bool
+	for _, msg := range m.seenMessages[1] {
+		for _, blk := range msg.Content {
+			if blk.Type == "tool_result" && blk.ToolError && strings.Contains(blk.ToolResult, "move") {
+				sawMoveError = true
+			}
+		}
+	}
+	if !sawMoveError {
+		t.Error("asymmetric move plan was not rejected with a move error")
+	}
+	if got := strings.Count(res.SmartDiff, "..."); got < 2 {
+		t.Errorf("symmetric folds missing from merged result:\n%s", res.SmartDiff)
 	}
 }
 

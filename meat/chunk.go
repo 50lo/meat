@@ -18,10 +18,13 @@
 // applied to segment bodies up front, string interiors and no-newline
 // markers are never cut, and per-chunk agent runs skip move detection
 // entirely — fragment-local occurrence counts would invent moves the whole
-// diff rejects as ambiguous. The remaining cost of chunking is judgment
-// locality: the model reasons over one chunk at a time, and cross-chunk
-// Python reference validation is per-chunk only. Splitting prefers file
-// boundaries, then hunk boundaries, to keep those costs rare.
+// diff rejects as ambiguous, so the splitter maps the whole-diff moves whose
+// sides share a chunk into that chunk's coordinates for enforcement. The
+// remaining cost of chunking is judgment locality: the model reasons over
+// one chunk at a time; cross-chunk Python reference validation is per-chunk
+// only; a move or Python suite whose parts land in different chunks cannot
+// be enforced or kept atomic beyond the owner's first body row. Splitting
+// prefers file boundaries, then hunk boundaries, to keep those costs rare.
 
 package meat
 
@@ -67,6 +70,11 @@ type diffChunk struct {
 	// into the merged reading diff without an agent run; whole-diff
 	// compilation retains such envelope lines too.
 	passthrough bool
+	// origins maps each physical line of text (0-based) to its 0-based line
+	// index in the original diff, or -1 for synthesized lines (segment @@
+	// headers, placeholder rows). abridgeChunked uses it to translate
+	// whole-diff move coordinates into chunk coordinates.
+	origins []int
 }
 
 // numberedLen is the exact size of numberedDiff output for count lines whose
@@ -185,7 +193,7 @@ func splitDiffForAbridging(raw string, budget int) ([]diffChunk, error) {
 	openEnd := 0
 	flush := func() error {
 		if open >= 0 {
-			if err := b.add(diffChunk{text: b.rangeText(open, openEnd), sectionID: -1}); err != nil {
+			if err := b.add(diffChunk{text: b.rangeText(open, openEnd), sectionID: -1, origins: b.rangeOrigins(open, openEnd)}); err != nil {
 				return err
 			}
 			open = -1
@@ -332,6 +340,16 @@ func (b *chunkBuilder) rangeText(start, end int) string {
 	return sb.String()
 }
 
+// rangeOrigins returns the 0-based original line indices for [start, end),
+// one per physical line of rangeText(start, end).
+func (b *chunkBuilder) rangeOrigins(start, end int) []int {
+	origins := make([]int, 0, end-start)
+	for i := start; i < end; i++ {
+		origins = append(origins, i)
+	}
+	return origins
+}
+
 func (b *chunkBuilder) spanSizes(start, end int) (textLen, rawLen, count int) {
 	return b.prefixText[end] - b.prefixText[start], b.prefixRaw[end] - b.prefixRaw[start], end - start
 }
@@ -397,16 +415,19 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 	}
 
 	piece := 0
-	emit := func(body string) error {
+	emit := func(body string, bodyOrigins []int) error {
 		prefix := metaText
+		prefixOrigins := b.rangeOrigins(meta.start, meta.end)
 		if piece == 0 {
 			prefix = preambleText + metaText
+			prefixOrigins = append(b.rangeOrigins(preamble.start, preamble.end), prefixOrigins...)
 		}
 		if err := b.add(diffChunk{
 			text:         prefix + body,
 			metaPrefix:   metaText,
 			sectionID:    sectionID,
 			continuation: piece > 0,
+			origins:      append(prefixOrigins, bodyOrigins...),
 		}); err != nil {
 			return err
 		}
@@ -435,7 +456,7 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 	openEnd := 0
 	flush := func() error {
 		if open >= 0 {
-			if err := emit(b.rangeText(open, openEnd)); err != nil {
+			if err := emit(b.rangeText(open, openEnd), b.rangeOrigins(open, openEnd)); err != nil {
 				return err
 			}
 			open = -1
@@ -490,6 +511,7 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 		last := &b.chunks[len(b.chunks)-1]
 		if candidate := last.text + tailText; fitsSingleRun(candidate, b.budget) {
 			last.text = candidate
+			last.origins = append(last.origins, b.rangeOrigins(tailStart, s.end)...)
 			tailText = ""
 		}
 	}
@@ -530,7 +552,7 @@ func (b *chunkBuilder) splitSection(sectionID int, s lineSpan) error {
 // opener would describe context the segment does not start inside. Segments
 // left with no changed rows (context-only, or import-only after the drop)
 // are not emitted; no plan could retain a change-free hunk either.
-func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string) error) error {
+func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen, count int), emit func(string, []int) error) error {
 	oldStart, oldZero, newStart, newZero, heading := parseHunkHeaderForSplit(b.lines[h.start].text)
 	headerEOL := b.lines[h.start].eol
 	if headerEOL == "" {
@@ -544,10 +566,12 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		for j < bodyEnd && (b.layout.kinds[j] == diffLineNoNewline || b.inString[j]) {
 			j++
 		}
-		// A Python decorator or suite header absorbs following blank rows and
-		// its first body row (recursively for nested owners): a cut directly
-		// after an owner would let one chunk's plan hide it while the body,
-		// invisible to that chunk's validator, survives in the next.
+		// A Python decorator or suite header absorbs following rows through
+		// its first nonblank body row on the kept/added side (recursively for
+		// nested owners): a cut directly after an owner would let one chunk's
+		// plan hide it while the body, invisible to that chunk's validator,
+		// survives in the next. Removed-side rows do not satisfy a kept
+		// owner's body.
 		last := i
 		for b.pythonOwnerLine(last) {
 			advanced := false
@@ -559,7 +583,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 				}
 				last = row
 				advanced = true
-				if strings.TrimSpace(b.lines[row].text[1:]) != "" {
+				if b.lines[row].text[0] != '-' && strings.TrimSpace(b.lines[row].text[1:]) != "" {
 					break
 				}
 			}
@@ -580,6 +604,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		segVisOld, segVisNew := 0, 0
 		segTextLen, segRawLen, segCount := 0, 0, 0
 		var body strings.Builder
+		var bodyOrigins []int
 		hasChange := false
 		for i < bodyEnd {
 			next := unitEnd(i)
@@ -612,7 +637,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 			oldOff += u.visOld + u.dropOld
 			newOff += u.visNew + u.dropNew
 			hasChange = hasChange || u.hasChange
-			b.appendUnit(&body, i, next)
+			bodyOrigins = b.appendUnit(&body, bodyOrigins, i, next)
 			atBodyStart = false
 			i = next
 		}
@@ -630,7 +655,7 @@ func (b *chunkBuilder) splitHunk(h lineSpan, prefixSizes func() (textLen, rawLen
 		sb.WriteString(synthHunkHeader(segOldStart, segVisOld, oldZero, segNewStart, segVisNew, newZero, segHeading))
 		sb.WriteString(headerEOL)
 		sb.WriteString(body.String())
-		if err := emit(sb.String()); err != nil {
+		if err := emit(sb.String(), append([]int{-1}, bodyOrigins...)); err != nil {
 			return err
 		}
 	}
@@ -693,19 +718,23 @@ func (b *chunkBuilder) unitStats(start, end int) unitInfo {
 
 // appendUnit writes the emitted text of one atomic unit: visible lines
 // verbatim, hidden lines dropped, placeholder-carrying hidden lines as their
-// fixed `...` row.
-func (b *chunkBuilder) appendUnit(sb *strings.Builder, start, end int) {
+// fixed `...` row. It returns origins extended with each emitted line's
+// original index (-1 for synthesized placeholder rows).
+func (b *chunkBuilder) appendUnit(sb *strings.Builder, origins []int, start, end int) []int {
 	for i := start; i < end; i++ {
 		if b.hidden[i] {
 			if text, eol, ok := b.placeholderRow(i); ok {
 				sb.WriteString(text)
 				sb.WriteString(eol)
+				origins = append(origins, -1)
 			}
 			continue
 		}
 		sb.WriteString(b.lines[i].text)
 		sb.WriteString(b.lines[i].eol)
+		origins = append(origins, i)
 	}
+	return origins
 }
 
 // placeholderRow returns the fixed mandatory-placeholder row for hidden line
@@ -854,6 +883,7 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 			modelChunks++
 		}
 	}
+	wholeMoves := detectedMovesInDiff(req.UnifiedDiff)
 	progress := req.Progress
 	if progress == nil {
 		progress = func(string) {}
@@ -889,6 +919,7 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 		sub := req
 		sub.UnifiedDiff = chunk.text
 		sub.chunkRun = true
+		sub.chunkMoves = mapMovesToChunk(wholeMoves, chunk.origins)
 		sub.Progress = func(msg string) { progress(label + ": " + msg) }
 		res, err := abridgeOne(ctx, model, sub)
 		if err != nil {
@@ -928,6 +959,46 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 	merged.SmartDiff = strings.Join(parts, "")
 	merged.Summary = strings.Join(summaries, " ")
 	return merged, nil
+}
+
+// mapMovesToChunk translates whole-diff move coordinates (1-based original
+// lines) into a chunk's own 1-based coordinates using the chunk's line
+// origins. A move maps only when BOTH complete sides landed contiguously in
+// this chunk; a move split across chunks cannot be enforced — a documented
+// cost of chunking.
+func mapMovesToChunk(moves []detectedMove, origins []int) []detectedMove {
+	if len(moves) == 0 || len(origins) == 0 {
+		return nil
+	}
+	// chunkLine[orig] = 1-based chunk line for original 0-based index orig.
+	chunkLine := make(map[int]int, len(origins))
+	for i, orig := range origins {
+		if orig >= 0 {
+			chunkLine[orig] = i + 1
+		}
+	}
+	mapRange := func(r lineRange) (lineRange, bool) {
+		start, ok := chunkLine[r.StartLine-1]
+		if !ok {
+			return lineRange{}, false
+		}
+		for orig := r.StartLine - 1; orig < r.EndLine; orig++ {
+			at, ok := chunkLine[orig]
+			if !ok || at != start+(orig-(r.StartLine-1)) {
+				return lineRange{}, false
+			}
+		}
+		return lineRange{StartLine: start, EndLine: start + (r.EndLine - r.StartLine)}, true
+	}
+	var mapped []detectedMove
+	for _, m := range moves {
+		removed, okR := mapRange(m.Removed)
+		added, okA := mapRange(m.Added)
+		if okR && okA {
+			mapped = append(mapped, detectedMove{Removed: removed, Added: added})
+		}
+	}
+	return mapped
 }
 
 // firstLineText returns the text of s's first physical line.

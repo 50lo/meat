@@ -132,15 +132,15 @@ func applyEditPlan(raw string, in submission) (string, error) {
 }
 
 func compileSubmission(raw string, in submission) (compiledPlan, error) {
-	return compileSubmissionCtl(raw, in, true)
+	return compileSubmissionMoves(raw, in, nil, true)
 }
 
-func compileSubmissionCtl(raw string, in submission, detectMoves bool) (compiledPlan, error) {
+func compileSubmissionMoves(raw string, in submission, provided []detectedMove, detect bool) (compiledPlan, error) {
 	var problems []error
 	if err := validateSummary(in.Summary); err != nil {
 		problems = append(problems, err)
 	}
-	compiled, err := compileEditPlanCtl(raw, in.plan(), detectMoves)
+	compiled, err := compileEditPlanMoves(raw, in.plan(), provided, detect)
 	if err != nil {
 		problems = append(problems, err)
 	}
@@ -153,15 +153,16 @@ func compileSubmissionCtl(raw string, in submission, detectMoves bool) (compiled
 // compileEditPlan validates and applies a plan without requiring a summary, so
 // the exact reading diff can be previewed before final submission.
 func compileEditPlan(raw string, in editPlan) (compiledPlan, error) {
-	return compileEditPlanCtl(raw, in, true)
+	return compileEditPlanMoves(raw, in, nil, true)
 }
 
-// compileEditPlanCtl is compileEditPlan with move detection controllable.
-// Chunked abridging disables it: move uniqueness is a whole-diff property (a
-// block appearing three times globally is deliberately ambiguous, but a chunk
-// seeing only two occurrences would invent a move), so the splitter
-// pre-resolves moves against the whole diff instead.
-func compileEditPlanCtl(raw string, in editPlan, detectMoves bool) (compiledPlan, error) {
+// compileEditPlanMoves is compileEditPlan with the move set controllable.
+// Move uniqueness is a whole-diff property: a block appearing three times
+// globally is deliberately ambiguous, but a chunk of a split diff seeing only
+// two occurrences would invent a move. Chunk compilation therefore disables
+// detection (detect=false) and instead enforces the moves the splitter
+// resolved against the whole diff and mapped into chunk coordinates.
+func compileEditPlanMoves(raw string, in editPlan, provided []detectedMove, detect bool) (compiledPlan, error) {
 	var problems []error
 
 	lines := splitSourceLines(raw)
@@ -172,8 +173,8 @@ func compileEditPlanCtl(raw string, in editPlan, detectMoves bool) (compiledPlan
 	if len(layout.problems) > 0 {
 		return compiledPlan{}, joinEditPlanErrors(layout.problems)
 	}
-	var moves []detectedMove
-	if detectMoves {
+	moves := provided
+	if detect {
 		moves = detectExactMoves(lines, layout)
 	}
 	mandatoryRemovals := mandatoryImportRemovalPlan(lines, layout)

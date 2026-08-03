@@ -76,9 +76,12 @@ type Request struct {
 	// chunkRun marks a per-chunk agent run of a split diff. Move detection is
 	// a whole-diff property (a block appearing three times globally is
 	// deliberately ambiguous, but a chunk seeing two occurrences would invent
-	// a move), so chunk runs skip move hints and per-plan move enforcement;
-	// the splitter pre-resolves moves against the whole diff.
-	chunkRun bool
+	// a move), so chunk runs never detect moves themselves; chunkMoves carries
+	// the whole-diff moves whose sides both landed in this chunk, mapped to
+	// chunk coordinates, and those are hinted and enforced instead. A move
+	// split across chunks cannot be enforced — a documented cost of chunking.
+	chunkRun   bool
+	chunkMoves []detectedMove
 }
 
 // Result is the abridged reading diff. The json tags give embedders and the
@@ -137,7 +140,7 @@ func abridgeOne(ctx context.Context, model Model, req Request) (*Result, error) 
 	ctx, cancel := context.WithTimeout(ctx, abridgeBudget)
 	defer cancel()
 
-	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff, noMoves: req.chunkRun}
+	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff, noMoves: req.chunkRun, moves: req.chunkMoves}
 	tools := tb.tools()
 
 	messages := []Message{{
@@ -243,7 +246,11 @@ func buildUserPrompt(req Request, numbered string) string {
 	var b strings.Builder
 	b.WriteString(userPromptIntro)
 	b.WriteString(userPromptImports)
-	if moves := detectedMovesInDiff(req.UnifiedDiff); !req.chunkRun && len(moves) > 0 {
+	moves := detectedMovesInDiff(req.UnifiedDiff)
+	if req.chunkRun {
+		moves = req.chunkMoves
+	}
+	if len(moves) > 0 {
 		fmt.Fprintf(&b, userPromptMoves, formatMovePairs(moves, maxMoveHints))
 	}
 	if req.RepoRoot != "" {
