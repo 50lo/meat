@@ -1409,6 +1409,106 @@ func TestAbridge_ChunkedEnforcesWholeDiffMoves(t *testing.T) {
 	}
 }
 
+// TestSplitDiff_PythonContinuationsAtomic: explicit backslash continuations
+// and open bracket expressions must not be severed across chunks. Per-chunk
+// validators cannot see the cross-boundary relationship: one chunk's plan
+// could remove `value = first + \` while the next retains the orphan
+// `    second`, or elide a list opener while its members and closer survive.
+func TestSplitDiff_PythonContinuationsAtomic(t *testing.T) {
+	meta := "diff --git a/mod.py b/mod.py\n--- a/mod.py\n+++ b/mod.py\n"
+	const pad = 8
+	var b strings.Builder
+	b.WriteString(meta)
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", pad+8)
+	for i := 0; i < pad; i++ {
+		fmt.Fprintf(&b, "+x%d = %d\n", i, i)
+	}
+	b.WriteString("+value = first + \\\n+    second\n+values = [\n+    1,\n+    2,\n+]\n+tail = 3\n+tail2 = 4\n")
+	diff := b.String()
+
+	// Try to force a cut on every continuation row; the atomic mask must
+	// keep each continuation with its opener.
+	for _, mark := range []string{"+value = first + \\\n", "+values = [\n", "+    1,\n", "+    2,\n"} {
+		prefix := strings.SplitAfter(diff, mark)[0]
+		budget := len(numberedDiff(prefix))
+		chunks, err := splitDiffForAbridging(diff, budget)
+		if err != nil {
+			t.Fatalf("budget at %q: %v", mark, err)
+		}
+		requireValidChunks(t, chunks, budget)
+		for i, c := range chunks {
+			if strings.Contains(c.text, "+value = first") != strings.Contains(c.text, "+    second") {
+				t.Errorf("budget at %q: chunk %d severed a backslash continuation:\n%s", mark, i, c.text)
+			}
+			if strings.Contains(c.text, "+values = [") != strings.Contains(c.text, "+]") {
+				t.Errorf("budget at %q: chunk %d severed a bracketed literal:\n%s", mark, i, c.text)
+			}
+		}
+	}
+
+	// End to end at one such budget: a plan that removes the continuation
+	// opener but keeps its tail must be rejected inside the chunk, exactly
+	// as whole-diff compilation rejects it.
+	prefix := strings.SplitAfter(diff, "+    1,\n")[0]
+	budget := len(numberedDiff(prefix))
+	chunks, err := splitDiffForAbridging(diff, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chunk1 string
+	for _, c := range chunks {
+		if strings.Contains(c.text, "+value = first") {
+			chunk1 = c.text
+			break
+		}
+	}
+	if chunk1 == "" {
+		t.Fatal("no chunk contains the continuation opener")
+	}
+	openerLine := 0
+	for i, l := range splitSourceLines(chunk1) {
+		if l.text == "+value = first + \\" {
+			openerLine = i + 1
+			break
+		}
+	}
+	if openerLine == 0 {
+		t.Fatalf("opener not found in chunk:\n%s", chunk1)
+	}
+	defer setSingleRunBudget(t, budget)()
+	bad := submission{
+		Remove:  []lineRange{{StartLine: openerLine, EndLine: openerLine}},
+		Replace: []lineReplacement{}, Fold: []lineFold{},
+		Summary: "Removes the assignment.",
+	}
+	identity := submission{Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "Adds rows."}
+	m := &scriptedModel{turns: []*Response{
+		assistant(toolUse("bad", "submit", bad)),
+		assistant(toolUse("ok", "submit", identity)),
+		assistant(toolUse("ok2", "submit", identity)),
+	}}
+	res, err := Abridge(context.Background(), m, Request{UnifiedDiff: diff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRejection bool
+	for _, msgs := range m.seenMessages {
+		for _, msg := range msgs {
+			for _, blk := range msg.Content {
+				if blk.Type == "tool_result" && blk.ToolError && strings.Contains(blk.ToolResult, "continuation") {
+					sawRejection = true
+				}
+			}
+		}
+	}
+	if !sawRejection {
+		t.Error("orphaning the backslash continuation was not rejected inside the chunk")
+	}
+	if !strings.Contains(res.SmartDiff, "+    second") || !strings.Contains(res.SmartDiff, "+value = first + \\") {
+		t.Errorf("merged result lost the continuation pair:\n%s", res.SmartDiff)
+	}
+}
+
 func TestFitsSingleRun(t *testing.T) {
 	diff := "diff --git a/a b/a\n@@ -1 +1 @@\n+x\n"
 	if !fitsSingleRun(diff, len(numberedDiff(diff))) {

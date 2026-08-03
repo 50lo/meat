@@ -134,11 +134,12 @@ type chunkBuilder struct {
 	foldAt []int
 	folds  []plannedFold
 	// inString marks lines whose lexical position (on either diff side) is
-	// inside a multiline string literal — a Go/JS backtick string or a
-	// Python/Java triple-quoted string. Mid-hunk cuts never land on such a
-	// line: a segment starting inside a literal would make the chunk-local
-	// compiler misread the closing delimiter as an opener, misclassifying
-	// embedded imports and string boundaries.
+	// inside a multiline continuation — a Go/JS backtick string, a
+	// Python/Java triple-quoted string, an open Python bracket expression, or
+	// a Python backslash continuation. Mid-hunk cuts never land on such a
+	// line: a segment starting there would make the chunk-local compiler
+	// misread delimiters (a closing quote as an opener) or lose the
+	// continuation relationship its validators enforce.
 	inString []bool
 	chunks   []diffChunk
 }
@@ -289,20 +290,43 @@ func stringInteriorMask(lines []sourceLine, layout diffLayout) []bool {
 	return mask
 }
 
-// stringScanState tracks one diff side's multiline-string position with the
-// same transitions as embeddedSourceLines.
+// stringScanState tracks one diff side's multiline continuation position:
+// string transitions match embeddedSourceLines, bracket depth and backslash
+// continuations match the Python delimiter/continuation validators.
 type stringScanState struct {
-	triple   pythonTripleState
-	backtick bool
+	triple    pythonTripleState
+	backtick  bool
+	brackets  pythonDelimiters
+	backslash bool
 }
 
 func (s *stringScanState) inString() bool {
-	return s.triple != pythonTripleNone || s.backtick
+	return s.triple != pythonTripleNone || s.backtick || s.backslash ||
+		s.brackets.round > 0 || s.brackets.square > 0 || s.brackets.curly > 0
 }
 
 func (s *stringScanState) scan(text string, language sourceLanguage) {
 	if language == sourceLanguagePython || language == sourceLanguageJava {
+		inTriple := s.triple != pythonTripleNone
+		if language == sourceLanguagePython {
+			// Bracket depth and backslash continuations matter only where the
+			// Python validators enforce them.
+			tripleForBalance := s.triple
+			s.brackets = s.brackets.add(pythonDelimiterBalanceWithState(text, &tripleForBalance))
+			if s.brackets.round < 0 {
+				s.brackets.round = 0
+			}
+			if s.brackets.square < 0 {
+				s.brackets.square = 0
+			}
+			if s.brackets.curly < 0 {
+				s.brackets.curly = 0
+			}
+		}
 		scanPythonTripleLine(text, &s.triple)
+		if language == sourceLanguagePython {
+			s.backslash = !inTriple && s.triple == pythonTripleNone && endsPythonBackslash(text)
+		}
 	}
 	if language == sourceLanguageGo || language == sourceLanguageJavaScript {
 		if countCodeBackticks(text)%2 == 1 {
