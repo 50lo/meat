@@ -73,6 +73,11 @@ type Request struct {
 	// prefix each update with its chunk). Callers use it for interactive
 	// feedback; it must not block.
 	Progress func(msg string)
+}
+
+// runOptions carries chunk-internal state for one agent run, kept out of the
+// exported Request so embedders' struct literals stay source-compatible.
+type runOptions struct {
 	// chunkRun marks a per-chunk agent run of a split diff. Move detection is
 	// a whole-diff property (a block appearing three times globally is
 	// deliberately ambiguous, but a chunk seeing two occurrences would invent
@@ -123,12 +128,12 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	if !fitsSingleRun(req.UnifiedDiff, singleRunDiffBytes) {
 		return abridgeChunked(ctx, model, req)
 	}
-	return abridgeOne(ctx, model, req)
+	return abridgeOne(ctx, model, req, runOptions{})
 }
 
 // abridgeOne runs the agent loop on one single-run-sized diff: the whole
 // input when it fits, or one chunk of a split diff.
-func abridgeOne(ctx context.Context, model Model, req Request) (*Result, error) {
+func abridgeOne(ctx context.Context, model Model, req Request, opts runOptions) (*Result, error) {
 	numbered := numberedDiff(req.UnifiedDiff)
 
 	maxTurns := req.MaxTurns
@@ -140,12 +145,12 @@ func abridgeOne(ctx context.Context, model Model, req Request) (*Result, error) 
 	ctx, cancel := context.WithTimeout(ctx, abridgeBudget)
 	defer cancel()
 
-	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff, noMoves: req.chunkRun, moves: req.chunkMoves}
+	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff, noMoves: opts.chunkRun, moves: opts.chunkMoves}
 	tools := tb.tools()
 
 	messages := []Message{{
 		Role:    RoleUser,
-		Content: []Block{textBlock(buildUserPrompt(req, numbered))},
+		Content: []Block{textBlock(buildUserPrompt(req, opts, numbered))},
 	}}
 
 	progress := req.Progress
@@ -242,13 +247,13 @@ const (
 	userPromptProtocol = "Prefer removing whole lines or ranges. Use fold to replace two or more contiguous same-polarity hunk lines with one machine-generated, indentation-preserving `...` row. Use replace only to elide part of one source line; `new` must match all of `old` with every omitted span visibly represented by `...` or `…`. Keep useful per-file and hunk structure unless the entire file or hunk is noise.\n\n```diff\n"
 )
 
-func buildUserPrompt(req Request, numbered string) string {
+func buildUserPrompt(req Request, opts runOptions, numbered string) string {
 	var b strings.Builder
 	b.WriteString(userPromptIntro)
 	b.WriteString(userPromptImports)
 	moves := detectedMovesInDiff(req.UnifiedDiff)
-	if req.chunkRun {
-		moves = req.chunkMoves
+	if opts.chunkRun {
+		moves = opts.chunkMoves
 	}
 	if len(moves) > 0 {
 		fmt.Fprintf(&b, userPromptMoves, formatMovePairs(moves, maxMoveHints))

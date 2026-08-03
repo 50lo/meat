@@ -942,10 +942,9 @@ func abridgeChunked(ctx context.Context, model Model, req Request) (*Result, err
 		label := fmt.Sprintf("chunk %d/%d", run, modelChunks)
 		sub := req
 		sub.UnifiedDiff = chunk.text
-		sub.chunkRun = true
-		sub.chunkMoves = mapMovesToChunk(wholeMoves, chunk.origins)
 		sub.Progress = func(msg string) { progress(label + ": " + msg) }
-		res, err := abridgeOne(ctx, model, sub)
+		opts := runOptions{chunkRun: true, chunkMoves: mapMovesToChunk(wholeMoves, chunk.origins)}
+		res, err := abridgeOne(ctx, model, sub, opts)
 		if err != nil {
 			return nil, &chunkError{label: label, err: err}
 		}

@@ -659,9 +659,9 @@ func TestPromptSurfaceStaysFrozen(t *testing.T) {
 	moveDiff := exactMoveDiff
 	surfaces := map[string]string{
 		"systemPrompt":         systemPrompt,
-		"userPrompt":           buildUserPrompt(Request{UnifiedDiff: moveDiff, RepoRoot: "/repo"}, numberedDiff(moveDiff)),
-		"userPrompt (no root)": buildUserPrompt(Request{UnifiedDiff: moveDiff}, numberedDiff(moveDiff)),
-		"userPrompt (no move)": buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff, RepoRoot: "/repo"}, numberedDiff(surfaceFixtureNoMoveDiff)),
+		"userPrompt":           buildUserPrompt(Request{UnifiedDiff: moveDiff, RepoRoot: "/repo"}, runOptions{}, numberedDiff(moveDiff)),
+		"userPrompt (no root)": buildUserPrompt(Request{UnifiedDiff: moveDiff}, runOptions{}, numberedDiff(moveDiff)),
+		"userPrompt (no move)": buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff, RepoRoot: "/repo"}, runOptions{}, numberedDiff(surfaceFixtureNoMoveDiff)),
 	}
 	tb := &toolbox{root: "/repo", rawDiff: moveDiff}
 	for _, tool := range tb.tools() {
@@ -715,7 +715,7 @@ func TestPromptSurfaceStaysFrozen(t *testing.T) {
 
 func TestBuildUserPromptNumbersOriginalDiff(t *testing.T) {
 	diff := "diff --git a/a b/a\n@@ -1 +1 @@\n+x"
-	prompt := buildUserPrompt(Request{UnifiedDiff: diff}, numberedDiff(diff))
+	prompt := buildUserPrompt(Request{UnifiedDiff: diff}, runOptions{}, numberedDiff(diff))
 	for _, want := range []string{"1|diff --git a/a b/a", "2|@@ -1 +1 @@", "3|+x"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("numbered prompt missing %q:\n%s", want, prompt)

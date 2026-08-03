@@ -69,11 +69,11 @@ func promptSurface() string {
 	add(systemPrompt)
 
 	numbered := numberedDiff(surfaceFixtureDiff)
-	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff, RepoRoot: "/repo"}, numbered))
-	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff}, numbered))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff, RepoRoot: "/repo"}, runOptions{}, numbered))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff}, runOptions{}, numbered))
 	numberedNoMove := numberedDiff(surfaceFixtureNoMoveDiff)
-	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff, RepoRoot: "/repo"}, numberedNoMove))
-	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff}, numberedNoMove))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff, RepoRoot: "/repo"}, runOptions{}, numberedNoMove))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff}, runOptions{}, numberedNoMove))
 	add(noToolCallNudge)
 
 	for _, tools := range [][]Tool{
@@ -91,7 +91,7 @@ func promptSurface() string {
 	// builder: a fixture with more detected moves than maxMoveHints, so
 	// "and N more" appears in an actual user prompt.
 	overflowDiff := surfaceOverflowDiff()
-	add(buildUserPrompt(Request{UnifiedDiff: overflowDiff}, numberedDiff(overflowDiff)))
+	add(buildUserPrompt(Request{UnifiedDiff: overflowDiff}, runOptions{}, numberedDiff(overflowDiff)))
 
 	// Plan feedback exactly as the model receives it: rendered by the real
 	// preview_plan tool handler, which applies tool-output truncation. The
