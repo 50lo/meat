@@ -43,6 +43,13 @@ const defaultBudget = 4 * time.Minute
 // without waiting for the production budget.
 var abridgeBudget = defaultBudget
 
+// noAbridgeBudgetModel is implemented by providers that own a more suitable
+// liveness policy for their process. The API providers intentionally do not
+// implement it, so their existing total wall-clock budget remains unchanged.
+type noAbridgeBudgetModel interface {
+	noAbridgeBudget() bool
+}
+
 // maxDiffBytes bounds both the raw diff and its numbered form sent to one
 // agent run. The numbered whole diff is sent up front (and re-sent every
 // turn), so a bigger input would blow the context window. Diffs over this
@@ -142,7 +149,10 @@ func abridgeOne(ctx context.Context, model Model, req Request, opts runOptions) 
 	}
 
 	callerCtx := ctx
-	ctx, cancel := context.WithTimeout(ctx, abridgeBudget)
+	cancel := func() {}
+	if budgetless, ok := model.(noAbridgeBudgetModel); !ok || !budgetless.noAbridgeBudget() {
+		ctx, cancel = context.WithTimeout(ctx, abridgeBudget)
+	}
 	defer cancel()
 
 	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff, noMoves: opts.chunkRun, moves: opts.chunkMoves}

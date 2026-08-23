@@ -52,6 +52,21 @@ type callerCancelFallbackModel struct {
 	cancel context.CancelFunc
 }
 
+type slowBudgetlessModel struct{}
+
+func (*slowBudgetlessModel) noAbridgeBudget() bool { return true }
+
+func (*slowBudgetlessModel) Generate(ctx context.Context, _ string, _ []Message, _ []Tool) (*Response, error) {
+	select {
+	case <-time.After(50 * time.Millisecond):
+		return assistant(toolUse("submit", "submit", submission{
+			Remove: []lineRange{}, Replace: []lineReplacement{}, Fold: []lineFold{}, Summary: "done",
+		})), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (m *callerCancelFallbackModel) Generate(ctx context.Context, _ string, _ []Message, _ []Tool) (*Response, error) {
 	m.seen++
 	if m.seen == 1 {
@@ -301,6 +316,16 @@ func TestAbridge_InternalDeadlineReturnsValidFallback(t *testing.T) {
 	}
 	if m.seen != 2 || res.SmartDiff != diff {
 		t.Fatalf("deadline fallback turns=%d diff changed=%v", m.seen, res.SmartDiff != diff)
+	}
+}
+
+func TestAbridge_ProviderOwnedLivenessPolicyDisablesAbridgeBudget(t *testing.T) {
+	oldBudget := abridgeBudget
+	abridgeBudget = time.Millisecond
+	defer func() { abridgeBudget = oldBudget }()
+
+	if _, err := Abridge(context.Background(), &slowBudgetlessModel{}, Request{UnifiedDiff: retentionFixtureDiff()}); err != nil {
+		t.Fatalf("provider-owned liveness policy unexpectedly hit Abridge budget: %v", err)
 	}
 }
 

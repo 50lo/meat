@@ -24,8 +24,9 @@
 //	git show <sha> | meat
 //	git diff main...HEAD | meat
 //
-// It reads OPENAI_API_KEY or ANTHROPIC_API_KEY from the environment
-// (optionally the matching provider base URL, plus MEAT_MODEL / -model).
+// It reads provider configuration from the environment. The default API
+// backend uses OPENAI_API_KEY or ANTHROPIC_API_KEY; the Codex backend invokes
+// the locally installed `codex` CLI and uses its existing login.
 package main
 
 import (
@@ -66,6 +67,7 @@ your git pager and color.diff config); piped/redirected output stays plain.
 
 Flags:
   -model string   Model to use (default $MEAT_MODEL or a built-in default).
+  -provider string  Backend to use: api or codex (default $MEAT_PROVIDER or api).
   -no-cache       Ignore any cached result and recompute (still updates cache).
   -staged         Read the staged changes (git diff --staged).
   -w              Read the unstaged working-tree changes (git diff).
@@ -73,6 +75,7 @@ Flags:
   -h, --help      Show this help.
 
 Environment:
+  MEAT_PROVIDER        Optional. api (default) or codex.
   OPENAI_API_KEY       API key for OpenAI models (including the default).
   OPENAI_BASE_URL      Optional. Override the OpenAI API base URL.
   ANTHROPIC_API_KEY    API key for Claude models.
@@ -83,6 +86,12 @@ Environment:
 On an exe.dev VM with an attached "llm" integration, meat uses the managed
 LLM gateway automatically — no API key needed. Provider-specific API keys or
 base URLs override the gateway.
+
+With -provider codex, meat runs codex exec locally using Codex's existing
+login, sends the exact numbered diff on stdin, and asks for a read-only,
+structured edit plan. Use -model or MEAT_MODEL to override Codex's configured
+model. Codex CLI must be installed and available on PATH. Codex has a
+10-minute idle timeout; stdout or stderr activity resets it.
 `
 
 func main() {
@@ -90,6 +99,7 @@ func main() {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	model := fs.String("model", "", "model to use (default $MEAT_MODEL or built-in default)")
+	provider := fs.String("provider", "", "backend to use (default $MEAT_PROVIDER or api)")
 	noCache := fs.Bool("no-cache", false, "ignore any cached result and recompute (still updates the cache)")
 	staged := fs.Bool("staged", false, "read the staged changes (git diff --staged)")
 	worktree := fs.Bool("w", false, "read the unstaged working-tree changes (git diff)")
@@ -127,7 +137,7 @@ func main() {
 	// provider model (which needs credentials/network) only here, AFTER the cache
 	// check.
 	compute := func(ctx context.Context) (*meat.Result, error) {
-		m, err := meat.NewModelFromEnv(ctx, *model)
+		m, err := meat.NewModelFromEnvWithProvider(ctx, *provider, *model, gitRoot())
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +166,7 @@ func main() {
 
 	opts := runOpts{
 		diff:     diff,
-		model:    meat.ResolveModel(*model),
+		model:    meat.ModelCacheIdentity(*provider, *model),
 		rubric:   meat.RubricHash(),
 		cacheDir: cacheDir(),
 		noCache:  *noCache,
