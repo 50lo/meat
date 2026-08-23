@@ -18,6 +18,13 @@ go install meat.dev/cmd/meat@latest
 Run with `meat` to review the latest commit.
 It takes git-looking parameters to pick commits to review.
 
+To use your existing Codex CLI login instead of an API key:
+
+```bash
+codex login
+meat -provider codex
+```
+
 It takes a while to process a commit for reading.
 So I suggest you have an agent build `meat` into your devtools so that
 it pre-processes it.
