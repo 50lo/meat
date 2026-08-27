@@ -10,7 +10,7 @@ import (
 // abridgeProtocolVersion covers the machine-side edit protocol as well as the
 // prose rubric. Changing the submit schema or edit semantics must invalidate
 // cached results even when the high-level advice is unchanged.
-const abridgeProtocolVersion = "source-edit-plan-v10-frozen-prompt-surface"
+const abridgeProtocolVersion = "source-edit-plan-v11-go-review-guardrails"
 
 // surfaceFixtureDiff is a canonical input containing an exact cross-file move,
 // used to render every branch of the model-visible prompt surface for hashing.
@@ -238,6 +238,17 @@ The input gutter has the form N|source. N is a 1-based physical line number in t
 - Submit empty remove, replace, and fold arrays when no edits of that kind are needed.
 - Retention feedback is advisory, not a quota. If it says retention is high, make one more pass over obvious suites and repetition, but keep uncertain or semantically distinct code.
 - If no meaningful change remains, remove every original line.
+
+## Go: contracts, failure paths, lifetimes, and tests
+
+For Go files, preserve the smallest connected path that lets a reviewer understand the changed package contract and runtime behavior. Keep a changed exported function, method, type, interface method, option, receiver, registration, or context boundary when it defines who can call the behavior or which implementation receives it. Preserve the changed condition, transformation, and observable return, mutation, I/O, callback, or emitted error that make the contract real. Fold routine field copies, constructor plumbing, conversions, repeated call sites, and mechanical interface assertions after one representative anchor.
+
+Go-specific rules:
+
+- A changed error path is semantic as a unit: keep the source of err, the condition that decides it, and the handling outcome. Preserve changed wrapping, identity, and classification such as %w, sentinel or typed errors, errors.Is/errors.As, retryability, and returned status. You may elide diagnostic prose and routine formatting arguments when they do not change those properties.
+- Treat goroutine starts, channel sends/receives/closes, select cases, locks, atomics, wait groups, context cancellation/deadlines, timers, and defer cleanup as lifecycle boundaries. Keep the smallest connected ownership path: what starts or acquires the resource, the condition or handoff that controls it, and what signals, releases, waits for, or cancels it. Do not reduce a concurrency change to an isolated call that hides its matching cleanup or synchronization effect.
+- Preserve Go block shape. Keep the owner of a surviving function, method, control block, select, or type declaration; fold its repetitive interior instead of leaving statements with no visible owner. Keep delimiters around meaningful multiline calls, composite literals, signatures, and raw strings.
+- In tests, table rows and subtests specify behavior. Keep the case dimensions, distinctive or boundary inputs, t.Run/t.Parallel behavior when changed, and the decisive assertion or expected error for each distinct outcome. Fold repeated middle cases, fixtures, mock construction, cleanup, and equivalent assertions only after keeping enough setup to explain the surviving stimulus and result.
 
 ## Python: semantic skeletons and suites
 

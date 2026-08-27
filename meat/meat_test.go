@@ -786,7 +786,7 @@ func TestSurfaceFixturesCoverBothMoveBranches(t *testing.T) {
 }
 
 func TestRubricHashPinned(t *testing.T) {
-	const pinned = "441f5e6e28ad3add"
+	const pinned = "a5b83180483aa5e3"
 	if h := RubricHash(); h != pinned {
 		t.Errorf("RubricHash() = %q, pinned %q; the model-visible prompt surface changed — review it against the freeze policy on systemPrompt, then update the pin", h, pinned)
 	}
