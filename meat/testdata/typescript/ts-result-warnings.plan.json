@@ -1,0 +1,16 @@
+{
+  "remove": [
+    {"start_line": 40, "end_line": 40}
+  ],
+  "replace": [
+    {"line": 27, "old": "backoff: \"linear\" | \"exponential\";", "new": "backoff: ...;"}
+  ],
+  "fold": [
+    {"start_line": 67, "end_line": 75},
+    {"start_line": 90, "end_line": 97},
+    {"start_line": 98, "end_line": 107},
+    {"start_line": 130, "end_line": 141},
+    {"start_line": 179, "end_line": 184},
+    {"start_line": 189, "end_line": 195}
+  ]
+}

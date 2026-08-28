@@ -45,6 +45,7 @@ const (
 	sourceLanguageGo
 	sourceLanguagePython
 	sourceLanguageJavaScript
+	sourceLanguageTypeScript
 	sourceLanguageRust
 	sourceLanguageC
 	sourceLanguageJava
@@ -431,10 +432,11 @@ func pathLanguage(path string) sourceLanguage {
 		return sourceLanguageGo
 	case strings.HasSuffix(path, ".py"), strings.HasSuffix(path, ".pyi"):
 		return sourceLanguagePython
-	case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".jsx"),
-		strings.HasSuffix(path, ".mjs"), strings.HasSuffix(path, ".cjs"),
-		strings.HasSuffix(path, ".ts"), strings.HasSuffix(path, ".tsx"),
+	case strings.HasSuffix(path, ".ts"), strings.HasSuffix(path, ".tsx"),
 		strings.HasSuffix(path, ".mts"), strings.HasSuffix(path, ".cts"):
+		return sourceLanguageTypeScript
+	case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".jsx"),
+		strings.HasSuffix(path, ".mjs"), strings.HasSuffix(path, ".cjs"):
 		return sourceLanguageJavaScript
 	case strings.HasSuffix(path, ".rs"):
 		return sourceLanguageRust

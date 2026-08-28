@@ -57,6 +57,24 @@ func TestCompileEditPlan_MandatoryImportsByLanguage(t *testing.T) {
 			want:     []string{"+package example", "+fun run()"},
 			unwanted: []string{"import tools.first", "import tools.second"},
 		},
+		{
+			name:     "TypeScript import type",
+			diff:     "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@\n+import type { Tool, Option } from \"./tools\";\n+import { run } from \"./runtime\";\n+\n+export const value = run<Tool, Option>(args);\n",
+			want:     []string{"+export const value"},
+			unwanted: []string{"import type", `from "./tools"`, `from "./runtime"`},
+		},
+		{
+			name:     "TypeScript multiline import and side-effect import",
+			diff:     "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@\n+import {\n+    type Config,\n+    type Runtime,\n+} from \"./core\";\n+import \"./side-effect\";\n+\n+export const value: Config = build();\n",
+			want:     []string{"+export const value"},
+			unwanted: []string{"import {", `from "./core"`, `import "./side-effect"`},
+		},
+		{
+			name:     "TypeScript embedded source JSX imports",
+			diff:     "diff --git a/a.tsx b/a.tsx\n--- a/a.tsx\n+++ b/a.tsx\n@@\n+const html = `\n+    <div>\n+        import { foo } from \"./escape\";\n+        const x = <span>{foo}</span>;\n+    </div>\n+`\n+\n+export const rendered = <div>{html}</div>\n",
+			want:     []string{"+export const rendered"},
+			unwanted: []string{`import { foo }`, `from "./escape"`},
+		},
 	}
 
 	for _, tc := range tests {
@@ -174,6 +192,21 @@ func TestCompileEditPlan_MandatoryImportRemovalAvoidsFalsePositives(t *testing.T
 			name: "Prose file",
 			diff: "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@\n+import data from the upstream service before rendering.\n+use feature flags for rollout.\n+#include examples in the guide.\n",
 			want: []string{"import data", "use feature", "#include examples"},
+		},
+		{
+			name: "TypeScript prose and identifier",
+			diff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@\n+importData(args);\n+useFeature(flag);\n+typeAlias = T;\n+const result = <T>(value: T): T => value;\n+require.extra(\"only in js\");\n",
+			want: []string{"importData", "useFeature", "typeAlias = T", "<T>(value: T)", `require.extra("only in js")`},
+		},
+		{
+			name: "TypeScript JSX content",
+			diff: "diff --git a/a.tsx b/a.tsx\n--- a/a.tsx\n+++ b/a.tsx\n@@\n+const label = <span>use the imported value</span>;\n+const view = <div>{label}</div>;\n+return <Component prop={import.meta.env.VAR} />;\n",
+			want: []string{"use the imported value", "{label}", "import.meta.env.VAR"},
+		},
+		{
+			name: "TypeScript public type re-export",
+			diff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@\n+export type PublicResult = { ok: true; value: string };\n+export { type InternalResult } from \"./internal\";\n",
+			want: []string{"export type PublicResult", "export { type InternalResult }"},
 		},
 	}
 	for _, tc := range tests {

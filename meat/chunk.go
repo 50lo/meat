@@ -328,7 +328,7 @@ func (s *stringScanState) scan(text string, language sourceLanguage) {
 			s.backslash = !inTriple && s.triple == pythonTripleNone && endsPythonBackslash(text)
 		}
 	}
-	if language == sourceLanguageGo || language == sourceLanguageJavaScript {
+	if language == sourceLanguageGo || language == sourceLanguageJavaScript || language == sourceLanguageTypeScript {
 		if countCodeBackticks(text)%2 == 1 {
 			s.backtick = !s.backtick
 		}
