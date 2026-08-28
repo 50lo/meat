@@ -1,0 +1,198 @@
+diff --git a/src/result.ts b/src/result.ts
+index 7a1b2c3..9d4e5f6 100644
+--- a/src/result.ts
++++ b/src/result.ts
+@@ -1,38 +1,58 @@
+-import { errorMessage } from "./errors";
+-import type { Logger } from "./logger";
+-import { log } from "./logger";
++import { errorMessage } from "./errors";
++import type { Logger } from "./logger";
++import { log } from "./logger";
+ 
+ export type Result<T, E = Error> =
+-    | { ok: true; value: T }
+-    | { ok: false; error: E };
++    | { ok: true; value: T; warnings: ReadonlyArray<string> }
++    | { ok: false; error: E; retryable: boolean };
+ 
+-export interface Options {
+-    timeout: number;
+-    retries: number;
+-    verbose: boolean;
++export interface Options {
++    timeout: number;
++    retries: number;
++    verbose: boolean;
++    backoff: "linear" | "exponential";
+ }
+ 
+-export async function run<T>(
+-    input: T,
+-    options: Options,
+-    logger: Logger,
+-): Promise<Result<T>> {
++export async function run<T>(
++    input: T,
++    options: Options,
++    logger: Logger,
++): Promise<Result<T>> {
+     const start = Date.now();
+     try {
+         const value = await attempt(input, options);
++        const warnings = collectWarnings(value, options);
+         if (options.verbose) {
+             log(logger, "run completed", { duration: Date.now() - start });
+         }
+-        return { ok: true, value };
++        return { ok: true, value, warnings };
+     } catch (error) {
+         const message = errorMessage(error);
++        const retryable = isRetryable(error);
+         if (options.retries > 0) {
+             log(logger, "retrying", { message });
+         }
+-        return { ok: false, error: error as Error };
++        return { ok: false, error: error as Error, retryable };
+     }
+ }
+ 
++function collectWarnings<T>(value: T, options: Options): ReadonlyArray<string> {
++    if (options.backoff === "exponential" && options.retries > 5) {
++        return ["exponential backoff with many retries may stall the queue"];
++    }
++    return [];
++}
++
++function isRetryable(error: unknown): boolean {
++    if (error instanceof TypeError) {
++        return false;
++    }
++    if (error instanceof RangeError) {
++        return true;
++    }
++    return true;
++}
++
+ export function unwrap<T, E>(result: Result<T, E>): T {
+     if (result.ok) {
+         return result.value;
+diff --git a/src/runner.test.ts b/src/runner.test.ts
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/runner.test.ts
++++ b/src/runner.test.ts
+@@ -1,37 +1,54 @@
+-import { run, unwrap } from "./result";
+-import type { Options } from "./result";
++import { run, unwrap } from "./result";
++import type { Options } from "./result";
+ 
+-function makeOptions(overrides: Partial<Options> = {}): Options {
+-    return {
+-        timeout: 1000,
+-        retries: 0,
+-        verbose: false,
+-        ...overrides,
+-    };
+-}
++const baseOptions = {
++    timeout: 1000,
++    retries: 0,
++    verbose: false,
++    backoff: "linear" as const,
++};
++
++function makeOptions(overrides: Partial<Options> = {}): Options {
++    return { ...baseOptions, ...overrides };
++}
+ 
+ describe("run", () => {
+-    it("returns a successful result on the happy path", async () => {
++    it("returns a successful result with empty warnings on the happy path", async () => {
+         const result = await run(42, makeOptions({ verbose: true }), silent);
+         expect(result.ok).toBe(true);
+         if (result.ok) {
+             expect(result.value).toBe(42);
++            expect(result.warnings).toEqual([]);
+         }
+     });
+ 
+-    it("returns an error result when attempt throws", async () => {
++    it("returns a retryable error when attempt throws", async () => {
+         const result = await run(brokenInput, makeOptions(), silent);
+         expect(result.ok).toBe(false);
+         if (!result.ok) {
+             expect(result.error).toBeInstanceOf(Error);
++            expect(result.retryable).toBe(true);
+         }
+     });
+ 
++    it("warns when exponential backoff is combined with many retries", async () => {
++        const result = await run(input, makeOptions({
++            backoff: "exponential",
++            retries: 8,
++        }), silent);
++        expect(result.ok).toBe(true);
++        if (result.ok) {
++            expect(result.warnings).toContain(
++                "exponential backoff with many retries may stall the queue",
++            );
++        }
++    });
++
+     it("TypeError is not retryable", async () => {
+         const result = await run(typeErrorInput, makeOptions(), silent);
+         expect(result.ok).toBe(false);
+         if (!result.ok) {
+             expect(result.retryable).toBe(false);
+         }
+     });
+ });
+diff --git a/src/component.tsx b/src/component.tsx
+index 9c8d7e6..3f2a1b0 100644
+--- a/src/component.tsx
++++ b/src/component.tsx
+@@ -1,26 +1,35 @@
+-import * as React from "react";
++import * as React from "react";
+ import type { Result } from "./result";
+ 
+ interface Props {
+-    label: string;
++    label: string;
+     onResult: (result: Result<unknown>) => void;
+ }
+ 
+ export function ResultView({ label, onResult }: Props): JSX.Element {
+     const [value, setValue] = React.useState<string | null>(null);
++    const [warnings, setWarnings] = React.useState<ReadonlyArray<string>>([]);
+     React.useEffect(() => {
+         fetchValue().then((result) => {
+             if (result.ok) {
+                 setValue(result.value);
++                setWarnings(result.warnings);
+             } else {
+                 onResult(result);
+             }
+         });
+     }, [onResult]);
+-    return (
+-        <div className="result-view">
+-            <span className="result-label">{label}</span>
+-            <span className="result-value">{value ?? "loading"}</span>
+-        </div>
+-    );
++    return (
++        <div className="result-view">
++            <span className="result-label">{label}</span>
++            <span className="result-value">{value ?? "loading"}</span>
++            {warnings.length > 0 && (
++                <ul className="result-warnings">
++                    {warnings.map((w) => (
++                        <li key={w}>{w}</li>
++                    ))}
++                </ul>
++            )}
++        </div>
++    );
+ }

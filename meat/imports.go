@@ -378,7 +378,7 @@ func hunkStartsImportContinuation(header string, language sourceLanguage) bool {
 	case sourceLanguagePython:
 		match := pythonFromStartRE.FindStringSubmatch(stripPythonImportComment(section))
 		return match != nil && strings.HasPrefix(strings.TrimSpace(match[1]), "(")
-	case sourceLanguageJavaScript:
+	case sourceLanguageJavaScript, sourceLanguageTypeScript:
 		if !strings.HasPrefix(section, "import ") || javascriptSideEffectImportRE.MatchString(section) || javascriptFromImportRE.MatchString(section) || javascriptTSRequireImportRE.MatchString(section) {
 			return false
 		}
@@ -438,7 +438,7 @@ func importContinuationEnd(lines []importSideLine, language sourceLanguage) int 
 			}
 		}
 		return len(lines)
-	case sourceLanguageJavaScript:
+	case sourceLanguageJavaScript, sourceLanguageTypeScript:
 		balance := 1
 		for i, line := range lines {
 			trimmed := strings.TrimSpace(line.text)
@@ -631,7 +631,7 @@ func embeddedSourceLines(lines []importSideLine, language sourceLanguage) []bool
 		if language == sourceLanguagePython || language == sourceLanguageJava {
 			scanPythonTripleLine(line.text, &triple)
 		}
-		if language == sourceLanguageGo || language == sourceLanguageJavaScript {
+		if language == sourceLanguageGo || language == sourceLanguageJavaScript || language == sourceLanguageTypeScript {
 			if countCodeBackticks(line.text)%2 == 1 {
 				backtick = !backtick
 			}
@@ -687,7 +687,7 @@ func importStatementEnd(lines []importSideLine, start int, language sourceLangua
 			return goImportEnd(lines, start)
 		case sourceLanguagePython:
 			return pythonImportEnd(lines, start)
-		case sourceLanguageJavaScript:
+		case sourceLanguageJavaScript, sourceLanguageTypeScript:
 			if end := javascriptImportEnd(lines, start); end > start {
 				return end
 			}
@@ -712,6 +712,7 @@ func importStatementEnd(lines []importSideLine, start int, language sourceLangua
 		sourceLanguageGo,
 		sourceLanguagePython,
 		sourceLanguageJavaScript,
+		sourceLanguageTypeScript,
 		sourceLanguageRust,
 		sourceLanguageC,
 		sourceLanguageJava,

@@ -10,7 +10,7 @@ import (
 // abridgeProtocolVersion covers the machine-side edit protocol as well as the
 // prose rubric. Changing the submit schema or edit semantics must invalidate
 // cached results even when the high-level advice is unchanged.
-const abridgeProtocolVersion = "source-edit-plan-v11-go-review-guardrails"
+const abridgeProtocolVersion = "source-edit-plan-v12-typescript-first-class"
 
 // surfaceFixtureDiff is a canonical input containing an exact cross-file move,
 // used to render every branch of the model-visible prompt surface for hashing.
@@ -189,6 +189,22 @@ func RubricHash() string {
 // the plan feedback for that specific conflict is the only channel that
 // explains the resolution. New compiler invariants should ship without new
 // prompt prose unless the model has a genuine decision to make.
+const typescriptRubricSection = `## TypeScript: types, contracts, and effects
+
+For TypeScript and TSX files, abridge around the smallest path that lets a reviewer understand the changed type-level contract and runtime behavior. Keep a changed exported declaration — class, interface, type alias, enum, function, const with a structural type, or namespace/module — when it defines who can call the behavior, what shape the data has, or which implementation is selected. Preserve the changed condition, transformation, and observable effect: return, mutation, awaited value, emitted error or event, dispatched action, or rendered output that makes the contract real. Fold routine field copies, constructor plumbing, type-level re-exports, and mechanical call-site renames after one representative anchor.
+
+TypeScript-specific rules:
+
+- Type-level changes are usually the heart of the change. Keep the owner of a surviving interface, type alias, enum, or generic signature, and fold only its members. A change to a discriminated-union variant set, a generic parameter, a mapped type, a satisfies clause, or a conditional type is the same kind of anchor as a Python decorator stack: keep it, fold only the repetitive interior. Meat rejects plans that hide a class/interface/type/enum/module/function/control owner while its body remains visible.
+- Decorators attach to a declaration the same way Python's do. Never leave a decorator detached from its target; keep decorators whose arguments define behavior (route paths/methods, framework metadata, dependency injection, validation, serialization, or task/lifecycle wiring). Fold only the decorator argument list, never the annotation itself.
+- Multiline expressions, calls, generics, signatures, template literals, tagged templates, and JSX must preserve recognizable boundaries. Prefer folding complete interior rows while keeping the opener and closer. Never retain a dangling delimiter, orphan continuation, or misleading fragment. Generics (e.g. <T, U extends ...>) are part of the public type contract: keep the angle-bracket shape, fold only the trivial middle type parameters. Meat rejects plans that change the brace or angle-bracket balance within a hunk.
+- "as" casts, satisfies, "!" non-null assertions, "?." optional chaining, and "??" are behavior-changing at the type level and the runtime level. Treat them as part of the contract, not noise. Preserve them when they appear on a retained line; the change in nullability or assertion is the semantic core of many TS diffs.
+- Template literals are part of the visible effect when they shape the rendered string, the error message, the SQL/HTML, the diagnostic, or the log line. Keep the assignment and the distinctive lines that define the case; fold boring bulk only when the remaining string still communicates its semantic role. Tagged templates (styled.div, html, gql, sql) are framework calls in disguise — keep the tag, fold the static argument body only when it is mechanically repetitive.
+- "import type" declarations are removed automatically with every other import. Type-only references in retained code are expected and need no import context. A pure "import type" change is a types-only signal, not a behavior change — it may be entirely removed without behavioral loss. Keep export type declarations when they define or change the public type contract; they are not imports and must not be removed as scaffolding.
+- Preserve async boundaries (async/await, Promise.all/race/allSettled, AbortController, cancellation, finally), exception type and control behavior, error wrapping, and Result-like discriminated unions when changed. Error message prose may be locally elided unless exact text is part of a public contract, a test assertion, or a user-visible message.
+- Test files use the same shape as production TS. Keep the test owner (the describe/it block, the framework entry, or the single function-style test), distinctive stimulus, and decisive assertion. Fold repeated setup, mock construction, teardown, and equivalent cases only after keeping enough context to explain the surviving stimulus and result.
+- For repetitive suites, prefer fold over deleting the entire suite. A fixed indented ... shows that omitted code exists without pretending to explain it.`
+
 const systemPrompt = `You are a code-reading assistant for a senior engineer who spends their day reading diffs of GOOD code. The code compiles and its tests pass. The reviewer is NOT hunting for nil panics or sweating details. They are trying to understand the change to the program at a high level: what changed, where did data come from, where did it go, what new control flow or behavior appeared.
 
 Your job: given a numbered unified diff (which may span MANY files), choose what to KEEP, REMOVE, and FOLD to produce an abridged "reading diff". Meat applies your edit plan to the immutable original diff. You NEVER write or regenerate the final diff yourself.
@@ -272,6 +288,8 @@ Python-specific rules:
 - Imports are removed automatically (rule 6); do not duplicate those removals in your plan. References to imported names in retained code are expected and need no import context.
 - Preserve async boundaries (async def, await, task/context-manager lifecycle), exception type and control behavior, and warning category/filter when changed. Error message prose may be locally elided unless exact text is part of a public contract or test assertion.
 - For repetitive suites, prefer fold over deleting the entire suite. A fixed indented ... shows that omitted code exists without pretending to explain it.
+
+` + typescriptRubricSection + `
 
 ## Worked examples
 

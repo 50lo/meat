@@ -350,6 +350,13 @@ func compileEditPlanMoves(raw string, in editPlan, provided []detectedMove, dete
 				continue
 			}
 		}
+		if layout.language[r.Line-1] == sourceLanguageTypeScript {
+			replaced := body[:start] + r.New + body[start+len(r.Old):]
+			if !tsReplacementPreservesStructure(body, replaced) || !tsReplacementPreservesOwner(body, replaced) {
+				problems = append(problems, fmt.Errorf("replace[%d]: must preserve TypeScript delimiters and structural tokens", i))
+				continue
+			}
+		}
 		replacements[r.Line] = append(replacements[r.Line], plannedReplacement{
 			lineReplacement: r,
 			planIndex:       i,
@@ -383,6 +390,9 @@ func compileEditPlanMoves(raw string, in editPlan, provided []detectedMove, dete
 			problems = append(problems, err)
 		}
 		if err := validateGoStructure(lines, layout, state, replacements); err != nil {
+			problems = append(problems, err)
+		}
+		if err := validateTypeScriptStructure(lines, layout, state, replacements); err != nil {
 			problems = append(problems, err)
 		}
 		completeMandatoryImportFraming(layout, &state, mandatoryHidden)
